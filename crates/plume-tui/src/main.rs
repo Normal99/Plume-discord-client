@@ -31,6 +31,7 @@ Options:
   --profile <name>   feather (default), standard or full: how many
                      channels and messages to keep in memory
   --silent-typing    don't tell others when you're typing
+  --no-notifications no desktop notifications for DMs and mentions
   --help             show this help
 
 Logs go to ~/.local/state/plume/plume-tui.log (set RUST_LOG=debug for more).";
@@ -39,6 +40,7 @@ Logs go to ~/.local/state/plume/plume-tui.log (set RUST_LOG=debug for more).";
 pub struct Options {
     pub profile: Profile,
     pub silent_typing: bool,
+    pub notifications: bool,
 }
 
 // One thread is plenty for a chat client and keeps memory low (Feather).
@@ -78,6 +80,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
     let mut options = Options {
         profile: Profile::FEATHER,
         silent_typing: false,
+        notifications: true,
     };
     let mut args = args.iter();
     while let Some(arg) = args.next() {
@@ -88,6 +91,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
                     .ok_or_else(|| format!("unknown profile `{name}` (try feather, standard or full)"))?;
             }
             "--silent-typing" => options.silent_typing = true,
+            "--no-notifications" => options.notifications = false,
             other => return Err(format!("unknown option `{other}`. See --help")),
         }
     }

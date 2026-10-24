@@ -7,8 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use plume_core::models::User;
 use plume_core::wire::{
-    WireChannel, WireEmoji, WireGuild, WireGuildProperties, WireGuildSettings, WireList, WireMember, WireMessage,
-    WireReadState, WireRole, WireUser,
+    WireChannel, WireEmbed, WireEmoji, WireGuild, WireGuildProperties, WireGuildSettings, WireList, WireMember,
+    WireMessage, WireReadState, WireRole, WireUser,
 };
 use plume_core::{Event, Snowflake};
 use serde::Deserialize;
@@ -149,6 +149,9 @@ pub fn decode(name: &str, data: &RawValue, me: Option<Snowflake>) -> Result<Deco
                 id: update.id,
                 channel_id: update.channel_id,
                 content: update.content,
+                embeds: update
+                    .embeds
+                    .map(|embeds| embeds.into_iter().filter_map(WireEmbed::into_model).collect()),
             }
         }
         "MESSAGE_DELETE" => {
@@ -321,7 +324,10 @@ struct WireId {
 struct WireMessageUpdate {
     id: Snowflake,
     channel_id: Snowflake,
+    #[serde(default)]
     content: Option<String>,
+    #[serde(default)]
+    embeds: Option<Vec<WireEmbed>>,
 }
 
 #[derive(Deserialize)]

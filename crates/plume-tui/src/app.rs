@@ -32,6 +32,8 @@ const ERROR_TIMEOUT: Duration = Duration::from_secs(6);
 const ACK_INTERVAL: Duration = Duration::from_secs(3);
 /// Messages fetched per page when scrolling up.
 const OLDER_PAGE: u8 = 50;
+/// At most one notification per channel this often, so a busy DM doesn't spam.
+const NOTIFY_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -91,6 +93,8 @@ enum TaskResult {
         action: &'static str,
         result: Result<(), RestError>,
     },
+    /// There's no desktop notification service; ask the terminal instead.
+    NotifyInTerminal { title: String, body: String },
 }
 
 /// Everything the UI shows and remembers. `render.rs` only reads it, apart
@@ -131,6 +135,8 @@ pub struct App {
     /// aren't marked read while you're looking elsewhere.
     terminal_focused: bool,
     silent_typing: bool,
+    notifications: bool,
+    last_notified: HashMap<Snowflake, Instant>,
     history_limit: u8,
     ticks: u32,
     quit: bool,
@@ -227,6 +233,8 @@ impl App {
             last_ack: None,
             terminal_focused: true,
             silent_typing: options.silent_typing,
+            notifications: options.notifications,
+            last_notified: HashMap::new(),
             history_limit: options.profile.messages_per_channel.min(100) as u8,
             ticks: 0,
             quit: false,
@@ -301,7 +309,8 @@ impl App {
             | Event::RoleDelete { .. }
             | Event::MessageAck { .. }
             | Event::GuildSettingsUpdate(_) => self.sidebar.mark_dirty(),
-            Event::MessageCreate { message, .. } => {
+            Event::MessageCreate { message, author } => {
+                self.maybe_notify(message, author);
                 // They sent it, so they're not typing any more.
                 if let Some(typers) = self.typing.get_mut(&message.channel_id) {
                     typers.retain(|(user, _)| *user != message.author_id);
@@ -373,6 +382,7 @@ impl App {
                     id: message.id,
                     channel_id: message.channel_id,
                     content: Some(message.content),
+                    embeds: Some(message.embeds),
                 }),
                 Err(error) => {
                     self.show_error(format!("Couldn't edit: {error}"));
@@ -381,6 +391,10 @@ impl App {
                     }
                 }
             },
+            TaskResult::NotifyInTerminal { title, body } => {
+                terminal_notification(&title, &body);
+                return;
+            }
             TaskResult::Done { action, result } => {
                 if let Err(error) = result {
                     self.show_error(match error {
@@ -829,6 +843,52 @@ impl App {
         }
     }
 
+    /// A desktop notification for pings you're not looking at: DMs and
+    /// mentions outside the open channel (or anywhere, while the terminal
+    /// is in the background). Muted channels stay quiet.
+    fn maybe_notify(&mut self, message: &Message, author: &User) {
+        let channel_id = message.channel_id;
+        let looking = self.terminal_focused && Some(channel_id) == self.store.active_channel();
+        if !self.notifications || looking || !self.store.pings_me(message) || self.store.is_muted(channel_id) {
+            return;
+        }
+        let now = Instant::now();
+        if self
+            .last_notified
+            .get(&channel_id)
+            .is_some_and(|at| now - *at < NOTIFY_INTERVAL)
+        {
+            return;
+        }
+        self.last_notified.insert(channel_id, now);
+
+        let in_dm = self
+            .store
+            .channel(channel_id)
+            .is_some_and(|c| c.kind == plume_core::models::ChannelKind::Dm);
+        let title = if in_dm {
+            author.display_name().to_owned()
+        } else {
+            format!(
+                "{} in {}",
+                author.display_name(),
+                sidebar::channel_label(&self.store, channel_id)
+            )
+        };
+        let body = if message.content.is_empty() && !message.attachments.is_empty() {
+            "sent an attachment".to_owned()
+        } else {
+            plume_notify::shorten(&message.content, 200)
+        };
+        let tasks = self.tasks.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Err(error) = plume_notify::send(&title, &body) {
+                tracing::debug!("desktop notification failed ({error}); using the terminal");
+                let _ = tasks.send(TaskResult::NotifyInTerminal { title, body });
+            }
+        });
+    }
+
     /// Tells the channel we're typing, at most once every few seconds.
     fn notify_typing(&mut self) {
         if self.silent_typing {
@@ -983,6 +1043,18 @@ fn resident_memory_kb() -> Option<u64> {
     line.split_whitespace().nth(1)?.parse().ok()
 }
 
+/// Asks the terminal for a notification (OSC 9, understood by Windows
+/// Terminal, iTerm2, kitty, WezTerm, foot, Ghostty…) and rings the bell for
+/// the rest. Control characters are removed so a message can't inject
+/// escape sequences.
+fn terminal_notification(title: &str, body: &str) {
+    use std::io::Write;
+    let clean = |text: &str| text.chars().filter(|c| !c.is_control()).collect::<String>();
+    let mut out = stdout();
+    let _ = write!(out, "\x1b]9;{}: {}\x07\x07", clean(title), clean(body));
+    let _ = out.flush();
+}
+
 /// What the user typed in the react prompt, as an emoji: `:name:` matches a
 /// reaction already on the message (custom ones included) or a known
 /// shortcode; anything else is taken as the emoji itself.
@@ -1059,6 +1131,7 @@ mod tests {
             mention_everyone: false,
             attachments: Vec::new(),
             reactions: Vec::new(),
+            embeds: Vec::new(),
         }
     }
 
@@ -1067,6 +1140,7 @@ mod tests {
         let options = Options {
             profile: plume_core::Profile::FEATHER,
             silent_typing: true,
+            notifications: false,
         };
         let token = Token::new("test");
         let (events, _) = mpsc::channel(1);
@@ -1397,5 +1471,89 @@ mod tests {
             Some("https://example.com/a")
         );
         assert_eq!(first_link("`https://in.code`"), None);
+    }
+
+    #[tokio::test]
+    async fn notifications_only_for_pings_you_are_not_looking_at() {
+        let mut app = demo_app();
+        app.notifications = true;
+        let dm = |id| Message {
+            channel_id: Snowflake(200),
+            ..message(id, 3, "psst")
+        };
+
+        // A DM while you're in another channel.
+        app.on_gateway(Event::MessageCreate {
+            message: dm(300),
+            author: user(3, "Bob"),
+        });
+        assert!(app.last_notified.contains_key(&Snowflake(200)));
+
+        // Plain chatter in a server channel doesn't notify.
+        let chatter = Message {
+            channel_id: Snowflake(101),
+            ..message(301, 3, "hello all")
+        };
+        app.on_gateway(Event::MessageCreate {
+            message: chatter,
+            author: user(3, "Bob"),
+        });
+        assert!(!app.last_notified.contains_key(&Snowflake(101)));
+
+        // The open channel only notifies while the terminal is in the background.
+        let mention = |id| Message {
+            mentions: vec![Snowflake(1)],
+            ..message(id, 3, "<@1> look")
+        };
+        app.on_gateway(Event::MessageCreate {
+            message: mention(302),
+            author: user(3, "Bob"),
+        });
+        assert!(!app.last_notified.contains_key(&Snowflake(100)));
+        app.on_terminal(TermEvent::FocusLost);
+        app.on_gateway(Event::MessageCreate {
+            message: mention(303),
+            author: user(3, "Bob"),
+        });
+        assert!(app.last_notified.contains_key(&Snowflake(100)));
+    }
+
+    #[tokio::test]
+    async fn messages_cannot_inject_terminal_escapes() {
+        let mut app = demo_app();
+        app.on_gateway(Event::MessageCreate {
+            message: message(400, 3, "evil \u{1b}]0;pwned\u{7} \u{1b}[2J text"),
+            author: user(3, "Bob"),
+        });
+        let screen = render(&mut app, 100, 24);
+        assert!(!screen.contains('\u{1b}') && !screen.contains('\u{7}'));
+        assert!(screen.contains("evil"));
+    }
+
+    #[tokio::test]
+    async fn embeds_show_title_link_and_description() {
+        use plume_core::models::Embed;
+        let mut app = demo_app();
+        let message_id = app.store.messages(Snowflake(100)).last().unwrap().id;
+        app.on_gateway(Event::MessageUpdate {
+            id: message_id,
+            channel_id: Snowflake(100),
+            content: None,
+            embeds: Some(vec![Embed {
+                title: Some("Rust 2.0 released".into()),
+                url: Some("https://blog.example/rust".into()),
+                description: Some("It's finally here.\n\nSecond paragraph".into()),
+            }]),
+        });
+        let screen = render(&mut app, 100, 24);
+        assert!(
+            screen.contains("Rust 2.0 released  https://blog.example/rust"),
+            "{screen}"
+        );
+        assert!(screen.contains("It's finally here."));
+        assert!(
+            !screen.contains("my own words (edited)"),
+            "an embed loading isn't an edit"
+        );
     }
 }

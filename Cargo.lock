@@ -2059,6 +2059,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "plume-notify"
+version = "0.1.0"
+dependencies = [
+ "tracing",
+ "zbus",
+]
+
+[[package]]
 name = "plume-rest"
 version = "0.1.0"
 dependencies = [
@@ -2083,6 +2091,7 @@ dependencies = [
  "plume-core",
  "plume-gateway",
  "plume-markdown",
+ "plume-notify",
  "plume-rest",
  "qrcode",
  "ratatui",

@@ -20,7 +20,7 @@ cargo build --release -p plume-tui
 ./target/release/plume-tui
 ```
 
-If QR login says a captcha is required, log in with a token instead (it's checked with Discord, then kept in your system keyring):
+If QR login says a captcha is required, log in with a token instead (it's checked with Discord, then kept in your system keyring, or in a private file if there isn't one):
 
 ```bash
 read -rs DISCORD_TOKEN && export DISCORD_TOKEN
@@ -38,7 +38,7 @@ read -rs DISCORD_TOKEN && export DISCORD_TOKEN
 
 Type `:fire:`-style shortcodes and they're sent as emoji.
 
-Options: `--profile feather|standard|full` (how much to keep in memory), `--silent-typing`. Logs go to `~/.local/state/plume/plume-tui.log` (`%LOCALAPPDATA%\plume` on Windows).
+Options: `--profile feather|standard|full` (how much to keep in memory), `--silent-typing`, `--no-notifications`. Logs go to `~/.local/state/plume/plume-tui.log` (`%LOCALAPPDATA%\plume` on Windows).
 
 ## Crates
 

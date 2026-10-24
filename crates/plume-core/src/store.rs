@@ -137,6 +137,22 @@ impl Store {
         permissions::can_view(guild, channel, me.id)
     }
 
+    /// Whether a message pings you: in a DM, `@everyone`/`@here`, or `@you`.
+    /// Your own messages never do.
+    pub fn pings_me(&self, message: &Message) -> bool {
+        let Some(me) = self.me.as_ref().map(|u| u.id) else {
+            return false;
+        };
+        if message.author_id == me {
+            return false;
+        }
+        let is_dm = self
+            .channels
+            .get(&message.channel_id)
+            .is_some_and(|c| c.kind.is_private());
+        is_dm || message.mention_everyone || message.mentions.contains(&me)
+    }
+
     /// Muted directly, through its category, or through its server.
     pub fn is_muted(&self, channel_id: Snowflake) -> bool {
         if self.muted.contains(&channel_id) {
@@ -478,13 +494,19 @@ impl Store {
                 id,
                 channel_id,
                 content,
+                embeds,
             } => {
+                let Some(message) = self.message_mut(channel_id, id) else {
+                    return;
+                };
                 if let Some(content) = content
-                    && let Some(message) = self.message_mut(channel_id, id)
                     && message.content != content
                 {
                     message.content = content;
                     message.edited = true;
+                }
+                if let Some(embeds) = embeds {
+                    message.embeds = embeds;
                 }
             }
             Event::MessageDelete { id, channel_id } => {
@@ -502,20 +524,16 @@ impl Store {
         let me = self.me.as_ref().map(|u| u.id);
         let from_me = Some(message.author_id) == me;
 
-        let is_dm = match self.channels.get_mut(&channel_id) {
-            Some(channel) => {
-                channel.last_message_id = channel.last_message_id.max(Some(message.id));
-                channel.kind.is_private()
-            }
-            None => false,
-        };
+        if let Some(channel) = self.channels.get_mut(&channel_id) {
+            channel.last_message_id = channel.last_message_id.max(Some(message.id));
+        }
 
         if from_me {
             // Sent from here or another device: either way, it's been read.
             self.unread.remove(&channel_id);
             self.last_read.insert(channel_id, message.id);
         } else if Some(channel_id) != self.active {
-            let pings_me = is_dm || message.mention_everyone || me.is_some_and(|me| message.mentions.contains(&me));
+            let pings_me = self.pings_me(&message);
             let muted = self.is_muted(channel_id);
             if pings_me || !muted {
                 let unread = self.unread.entry(channel_id).or_default();
@@ -695,6 +713,7 @@ mod tests {
             mention_everyone: false,
             attachments: Vec::new(),
             reactions: Vec::new(),
+            embeds: Vec::new(),
         }
     }
 
@@ -852,6 +871,7 @@ mod tests {
             id: Snowflake(2),
             channel_id: Snowflake(100),
             content: content.map(str::to_owned),
+            embeds: None,
         };
         store.apply(update(None)); // an embed loading isn't an edit
         assert!(!store.message(Snowflake(100), Snowflake(2)).unwrap().edited);

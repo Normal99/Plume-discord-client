@@ -24,6 +24,7 @@ const MENTION_ME: Style = Style::new()
     .add_modifier(Modifier::BOLD);
 const LINK: Style = Style::new().fg(Color::Blue).add_modifier(Modifier::UNDERLINED);
 const EMOJI: Style = Style::new().fg(Color::Magenta);
+const EMBED_BAR: Style = Style::new().fg(Color::Rgb(88, 101, 242));
 const SELECTED: Style = Style::new().bg(Color::Rgb(45, 48, 70));
 const REACTION: Style = Style::new().fg(Color::Gray).bg(Color::Rgb(40, 40, 48));
 const REACTION_MINE: Style = Style::new().fg(Color::White).bg(Color::Rgb(70, 78, 160));
@@ -193,6 +194,27 @@ fn content_lines(store: &Store, message: &Message) -> Vec<Vec<Segment>> {
         lines.push(current);
     }
 
+    for embed in &message.embeds {
+        let mut first = vec![("▏ ".to_owned(), EMBED_BAR)];
+        match (&embed.title, &embed.url) {
+            (Some(title), Some(url)) => {
+                first.push((title.clone(), Style::new().add_modifier(Modifier::BOLD)));
+                first.push(("  ".to_owned(), Style::new()));
+                first.push((url.clone(), LINK));
+            }
+            (Some(title), None) => first.push((title.clone(), Style::new().add_modifier(Modifier::BOLD))),
+            (None, Some(url)) => first.push((url.clone(), LINK)),
+            (None, None) => {}
+        }
+        if first.len() > 1 {
+            lines.push(first);
+        }
+        if let Some(description) = &embed.description {
+            for text in description.lines().filter(|l| !l.trim().is_empty()).take(4) {
+                lines.push(vec![("▏ ".to_owned(), EMBED_BAR), (text.to_owned(), DIM)]);
+            }
+        }
+    }
     for attachment in &message.attachments {
         lines.push(vec![
             (

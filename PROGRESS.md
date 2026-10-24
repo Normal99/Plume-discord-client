@@ -26,6 +26,19 @@ Windows). If something breaks, that file is the most useful thing to send.
 
 ## Changelog
 
+### Milestone 3: reliability (in review)
+
+- **Login without a system keyring:** on servers, WSL or minimal Linux
+  installs, the token is saved to `~/.config/plume/token`, readable only by
+  you. `plume-tui logout` removes it.
+- **Desktop notifications** for DMs and mentions you aren't looking at
+  (Linux notification daemon, macOS Notification Center; other terminals get
+  a terminal notification and bell). Muted channels stay quiet, and each
+  channel notifies at most every 5 seconds. Turn off with `--no-notifications`.
+- **Embeds** (link previews, bot messages) show their title, link and a short
+  description.
+- **Safety:** messages can't inject terminal escape codes (now tested).
+
 ### Milestone 2: everyday chat features (in review)
 
 - **Reply, edit, delete:** with the box empty, press `↑` to pick a message,

@@ -131,6 +131,20 @@ pub struct Message {
     pub mention_everyone: bool,
     pub attachments: Vec<Attachment>,
     pub reactions: Vec<Reaction>,
+    pub embeds: Vec<Embed>,
+}
+
+/// A link preview or a bot's rich message, reduced to its text.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Embed {
+    pub title: Option<String>,
+    pub url: Option<String>,
+    /// Cut to [`Embed::MAX_DESCRIPTION`] characters when parsed.
+    pub description: Option<String>,
+}
+
+impl Embed {
+    pub const MAX_DESCRIPTION: usize = 300;
 }
 
 /// A Unicode emoji (`id: None`, `name` is the emoji itself) or a custom one.

@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use crate::Snowflake;
 use crate::models::{
-    Attachment, Channel, ChannelKind, Emoji, Guild, GuildSettings, Message, Overwrite, OverwriteKind, Reaction,
+    Attachment, Channel, ChannelKind, Embed, Emoji, Guild, GuildSettings, Message, Overwrite, OverwriteKind, Reaction,
     ReadState, Role, User,
 };
 
@@ -245,6 +245,39 @@ pub struct WireMessage {
     pub attachments: Vec<WireAttachment>,
     #[serde(default)]
     pub reactions: Vec<WireReaction>,
+    #[serde(default)]
+    pub embeds: Vec<WireEmbed>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WireEmbed {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+impl WireEmbed {
+    /// `None` for embeds with no text at all (a bare image preview).
+    pub fn into_model(self) -> Option<Embed> {
+        let description = self.description.filter(|d| !d.trim().is_empty()).map(|d| {
+            if d.chars().count() > Embed::MAX_DESCRIPTION {
+                let mut cut: String = d.chars().take(Embed::MAX_DESCRIPTION).collect();
+                cut.push('…');
+                cut
+            } else {
+                d
+            }
+        });
+        let embed = Embed {
+            title: self.title.filter(|t| !t.trim().is_empty()),
+            url: self.url,
+            description,
+        };
+        (embed.title.is_some() || embed.description.is_some()).then_some(embed)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -325,6 +358,7 @@ impl WireMessage {
                     me: r.me,
                 })
                 .collect(),
+            embeds: self.embeds.into_iter().filter_map(WireEmbed::into_model).collect(),
         };
         (message, self.author.into_model())
     }
@@ -482,6 +516,22 @@ mod tests {
         assert_eq!(message.mentions, [Snowflake(9)]);
         assert_eq!(message.attachments[0].size, 10);
         assert_eq!(author.display_name(), "alice");
+    }
+
+    #[test]
+    fn embeds_keep_text_and_drop_bare_images() {
+        let embeds: Vec<WireEmbed> = serde_json::from_str(&format!(
+            r#"[{{ "type": "image", "url": "https://x/y.png" }},
+                {{ "type": "rich", "title": "T", "description": "{}" }}]"#,
+            "a".repeat(400)
+        ))
+        .unwrap();
+        let embeds: Vec<Embed> = embeds.into_iter().filter_map(WireEmbed::into_model).collect();
+        assert_eq!(embeds.len(), 1);
+        assert_eq!(
+            embeds[0].description.as_ref().unwrap().chars().count(),
+            Embed::MAX_DESCRIPTION + 1
+        );
     }
 
     #[test]

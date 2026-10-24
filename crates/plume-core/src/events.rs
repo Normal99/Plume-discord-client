@@ -1,5 +1,5 @@
 use crate::Snowflake;
-use crate::models::{Channel, Emoji, Guild, GuildSettings, Message, ReadState, Role, User};
+use crate::models::{Channel, Embed, Emoji, Guild, GuildSettings, Message, ReadState, Role, User};
 
 /// Something that happened on Discord, already decoded into models.
 /// The gateway produces these; [`crate::Store::apply`] consumes them.
@@ -49,6 +49,8 @@ pub enum Event {
         channel_id: Snowflake,
         /// `None` when only something else changed (an embed loaded, say).
         content: Option<String>,
+        /// `None` when the embeds didn't change.
+        embeds: Option<Vec<Embed>>,
     },
     MessageDelete {
         id: Snowflake,
