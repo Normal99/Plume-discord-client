@@ -1,17 +1,31 @@
 name: Release
 
-# Push a tag like `v0.2.0` to publish a release with downloads for every
-# platform. Anyone can download them, no GitHub account needed.
+# Publishes a release with downloads for every platform; anyone can
+# download them, no GitHub account needed. Start it any of these ways:
+# push a tag like `v0.2.0`, publish a release from the Releases page, or
+# run this workflow from the Actions tab with a version.
 on:
   push:
     tags: ["v*"]
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version to release, like v0.2.0 (created from the chosen branch)"
+        required: true
 
 permissions:
   contents: write
 
+# A release made on the website also pushes its tag; run those one at a time.
+concurrency:
+  group: release-${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  TAG: ${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
 
 jobs:
   test:
@@ -58,7 +72,7 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          name="plume-tui-${GITHUB_REF_NAME}-${{ matrix.name }}"
+          name="plume-tui-${TAG}-${{ matrix.name }}"
           mkdir -p "dist/$name"
           exe=plume-tui
           [[ "${{ matrix.os }}" == windows-* ]] && exe=plume-tui.exe
@@ -88,6 +102,8 @@ jobs:
         run: cd dist && sha256sum * > SHA256SUMS.txt
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.TAG }}
+          target_commitish: ${{ github.sha }}
           files: dist/*
           generate_release_notes: true
           body: |
@@ -104,4 +120,4 @@ jobs:
 
             On macOS, the first time: run `xattr -d com.apple.quarantine plume-tui` (the build isn't signed by Apple). On Windows, SmartScreen may warn; choose "More info" → "Run anyway".
 
-            What's new is in [PROGRESS.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/PROGRESS.md).
+            What's new is in [PROGRESS.md](https://github.com/${{ github.repository }}/blob/${{ env.TAG }}/PROGRESS.md).
