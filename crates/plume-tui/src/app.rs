@@ -1770,4 +1770,121 @@ mod tests {
         }
         println!("cached frame:   {:.2} ms", start.elapsed().as_secs_f64() * 10.0);
     }
+
+    /// Random and hostile message text through the parser, the wrapper and the
+    /// renderer at many widths. Run with `--ignored` for a much longer loop.
+    mod stress {
+        use super::*;
+
+        const PIECES: &[&str] = &[
+            "*",
+            "**",
+            "_",
+            "__",
+            "~~",
+            "||",
+            "`",
+            "```",
+            "> ",
+            ">>> ",
+            "# ",
+            "-# ",
+            "\\",
+            "\n",
+            " ",
+            "  ",
+            "<@1>",
+            "<@&5>",
+            "<#100>",
+            "<:x:123>",
+            "<a:y:456>",
+            "<t:1700000000:R>",
+            "<t:99999999999999:F>",
+            "@everyone",
+            "https://a.b/c?d=e",
+            "<https://x.y>",
+            "[t](https://z)",
+            ":fire:",
+            "🦀",
+            "👨‍👩‍👧",
+            "e\u{301}",
+            "\u{200b}",
+            "\u{202e}",
+            "中文",
+            "\t",
+            "\u{1b}[31m",
+            "\r",
+            "word",
+            "longwordwithoutanyspaces_longwordwithoutanyspaces",
+        ];
+
+        struct Rng(u64);
+        impl Rng {
+            fn next(&mut self) -> usize {
+                self.0 ^= self.0 << 13;
+                self.0 ^= self.0 >> 7;
+                self.0 ^= self.0 << 17;
+                self.0 as usize
+            }
+        }
+
+        fn random_text(rng: &mut Rng) -> String {
+            let len = rng.next() % 60;
+            (0..len).map(|_| PIECES[rng.next() % PIECES.len()]).collect()
+        }
+
+        fn run(rounds: usize) {
+            let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+            let mut app = demo_app();
+            for round in 0..rounds {
+                let mut message = message(10_000 + round as u64, 2, &random_text(&mut rng));
+                message.reply_to = (round % 7 == 0).then_some(Snowflake(90));
+                app.on_gateway(Event::MessageCreate {
+                    message,
+                    author: user(2, "Alice"),
+                });
+                let width = 1 + (rng.next() % 120) as u16;
+                let height = 1 + (rng.next() % 40) as u16;
+                render(&mut app, width, height);
+            }
+        }
+
+        #[tokio::test]
+        async fn random_messages_never_break_rendering() {
+            run(300);
+        }
+
+        #[tokio::test]
+        #[ignore]
+        async fn random_messages_long() {
+            run(20_000);
+        }
+
+        #[test]
+        fn hostile_messages_render_quickly() {
+            let cases = [
+                "*".repeat(4000),
+                "**a".repeat(1300),
+                "||".repeat(2000),
+                "`".repeat(4000),
+                "> ".repeat(2000),
+                "\\".repeat(4000),
+                "<@".repeat(2000),
+                "_".repeat(4000),
+                "[a](".repeat(1000),
+                "x".repeat(4000),
+                "\n".repeat(2000),
+            ];
+            for text in cases {
+                let start = std::time::Instant::now();
+                let message = message(1, 2, &text);
+                let mut store = plume_core::Store::new(plume_core::Profile::FEATHER);
+                store.insert_history(Snowflake(100), vec![(message, user(2, "Alice"))]);
+                let view = text::channel_lines(&store, Snowflake(100), 80);
+                assert!(!view.lines.is_empty());
+                let took = start.elapsed();
+                assert!(took.as_millis() < 500, "{:?}… took {took:?}", &text[..10]);
+            }
+        }
+    }
 }
