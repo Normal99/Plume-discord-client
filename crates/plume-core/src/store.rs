@@ -8,7 +8,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::models::{Channel, Guild, GuildSettings, Message, Reaction, ReadState, User};
+use crate::models::{Channel, ChannelKind, Guild, GuildSettings, Message, Reaction, ReadState, User};
 use crate::{Event, Profile, Snowflake, permissions};
 
 /// Unread state for a channel (or, summed, for a whole server).
@@ -138,9 +138,15 @@ impl Store {
     /// Whether you're allowed to see a channel. DMs, and channels in servers
     /// where we don't know your roles, count as visible.
     pub fn can_view(&self, channel_id: Snowflake) -> bool {
-        let Some(channel) = self.channels.get(&channel_id) else {
+        let Some(mut channel) = self.channels.get(&channel_id) else {
             return false;
         };
+        // Threads follow their channel's permissions.
+        if channel.kind == ChannelKind::Thread
+            && let Some(parent) = channel.parent_id.and_then(|id| self.channels.get(&id))
+        {
+            channel = parent;
+        }
         let (Some(guild), Some(me)) = (channel.guild_id.and_then(|id| self.guilds.get(&id)), &self.me) else {
             return true;
         };
@@ -419,6 +425,12 @@ impl Store {
                 }
             }
             Event::GuildSettingsUpdate(settings) => self.apply_settings(settings),
+            Event::ThreadsSync { guild_id, threads } => {
+                for mut thread in threads {
+                    thread.guild_id = Some(guild_id);
+                    self.apply(Event::ChannelUpsert(thread));
+                }
+            }
             Event::ReactionAdd {
                 channel_id,
                 message_id,
@@ -1118,6 +1130,12 @@ mod tests {
         });
         assert!(!store.can_view(Snowflake(103)));
         assert!(store.can_view(Snowflake(200)), "DMs are always visible");
+        // A thread is as visible as its channel.
+        store.apply(Event::ChannelUpsert(Channel {
+            parent_id: Some(Snowflake(103)),
+            ..channel(104, Some(10), ChannelKind::Thread)
+        }));
+        assert!(!store.can_view(Snowflake(104)));
     }
 
     #[test]

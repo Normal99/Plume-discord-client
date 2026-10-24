@@ -1,4 +1,5 @@
 use plume_core::Store;
+use plume_core::models::ChannelKind;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -93,17 +94,29 @@ fn sidebar_row(
             (format!("    {}", name.to_uppercase()), Default::default(), DIM)
         }
         Entry::Channel(id) => {
-            let name = store.channel(id).and_then(|c| c.name.as_deref()).unwrap_or("?");
+            let channel = store.channel(id);
+            let name = channel.and_then(|c| c.name.as_deref()).unwrap_or("?");
+            let kind = channel.map(|c| c.kind);
+            let indent = if kind == Some(ChannelKind::Thread) {
+                "      "
+            } else {
+                "    "
+            };
             if !store.can_view(id) {
-                // Same width as "    # ": the lock is two columns wide.
-                return Line::styled(text::truncate(&format!("   🔒 {name}"), width), DIM);
+                // Same width as "# ": the lock is two columns wide.
+                return Line::styled(text::truncate(&format!("{}🔒 {name}", &indent[1..]), width), DIM);
             }
+            let icon = match kind {
+                Some(ChannelKind::Thread) => '↳',
+                Some(ChannelKind::Forum) => '▤',
+                _ => '#',
+            };
             let base = if store.is_muted(id) {
                 DIM
             } else {
                 Style::new().fg(Color::Gray)
             };
-            (format!("    # {name}"), store.unread(id), base)
+            (format!("{indent}{icon} {name}"), store.unread(id), base)
         }
     };
 

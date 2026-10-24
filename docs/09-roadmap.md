@@ -31,6 +31,6 @@ Themes and the built-in feature toggles, a profile switcher with a live RSS read
 Plugin API, screen share/video, multiple accounts, search UI.
 
 ## Progress notes
-- **Done in the TUI from M2:** sending, the markdown renderer, attachments (as links), mentions, typing indicators (both ways), unread and mention counts, DMs and group DMs, the quick switcher.
-- **Still open from M2:** edit/delete/reply from the client, reactions, emoji picker, embeds, threads, notifications, read state synced with Discord (unread counts currently start from zero at launch), loading older history while scrolling, and hiding channels you can't view (needs `permissions.rs`).
+- **Done in the TUI from M2:** sending, editing, deleting and replying; the markdown renderer; attachments (view as links, upload with `/upload`); reactions (with `:shortcode:` entry); embeds; mentions; typing indicators (both ways); unread and mention counts synced with Discord, with acks; muted servers and channels; desktop notifications; DMs and group DMs; threads and forum posts; loading older history; hiding (or optionally showing) channels you can't view; the quick switcher; a `config.toml` settings file.
+- **Still open from M2:** a visual emoji picker and an in-app settings page.
 - READY is parsed straight from borrowed JSON into typed structs, so fields Plume doesn't use are skipped without being allocated. That covers most of what `ready_filter.rs` was planned for; measure with a big account before doing more.

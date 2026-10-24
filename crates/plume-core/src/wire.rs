@@ -70,6 +70,22 @@ pub struct WireChannel {
     pub last_message_id: Option<Snowflake>,
     #[serde(default)]
     pub permission_overwrites: Vec<WireOverwrite>,
+    /// Only on threads.
+    #[serde(default)]
+    pub thread_metadata: Option<WireThreadMetadata>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct WireThreadMetadata {
+    #[serde(default)]
+    pub archived: bool,
+}
+
+impl WireChannel {
+    /// An archived thread: gone from the channel list until someone posts.
+    pub fn is_archived(&self) -> bool {
+        self.thread_metadata.as_ref().is_some_and(|m| m.archived)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -182,6 +198,9 @@ pub struct WireGuild {
     pub owner_id: Option<Snowflake>,
     #[serde(default)]
     pub channels: Vec<WireChannel>,
+    /// Active threads you can see.
+    #[serde(default)]
+    pub threads: Vec<WireChannel>,
     #[serde(default)]
     pub roles: Vec<WireRole>,
     /// A few members (usually including you) in GUILD_CREATE.
@@ -212,7 +231,12 @@ impl WireGuild {
                 .find(|m| m.user_id() == Some(me))
                 .map(|m| m.roles)
         });
-        let channels: Vec<Channel> = self.channels.into_iter().map(|c| c.into_model(Some(id))).collect();
+        let channels: Vec<Channel> = self
+            .channels
+            .into_iter()
+            .chain(self.threads.into_iter().filter(|t| !t.is_archived()))
+            .map(|c| c.into_model(Some(id)))
+            .collect();
         let guild = Guild {
             id,
             name: name.unwrap_or_else(|| "(unnamed server)".to_owned()),

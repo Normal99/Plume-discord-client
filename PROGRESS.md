@@ -37,6 +37,14 @@ Windows). If something breaks, that file is the most useful thing to send.
   (`~/.config/plume/` on Linux/macOS, `%APPDATA%\plume\` on Windows) with
   `profile`, `silent_typing`, `notifications` and `show_locked`. Typos are
   reported with the line number. Command-line options still win.
+- **Threads and forums:** active threads appear under their channel (`↳`),
+  busiest first, and open like any channel. Forum channels (`▤`) list their
+  posts underneath. Archived threads disappear. Threads follow their
+  channel's permissions.
+- **Stress tests:** 20,000 random messages full of markdown, emoji, control
+  characters and odd widths render without a crash; worst-case inputs
+  (thousands of `*`, `||`, backticks) still render in milliseconds.
+  114 tests now.
 
 ### Milestone 4: speed and size (in review)
 

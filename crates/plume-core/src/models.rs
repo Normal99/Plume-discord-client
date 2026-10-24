@@ -91,7 +91,7 @@ impl ChannelKind {
 
     /// Channels you can read and send messages in from a text list.
     pub fn is_text(self) -> bool {
-        matches!(self, ChannelKind::Text | ChannelKind::News)
+        matches!(self, ChannelKind::Text | ChannelKind::News | ChannelKind::Thread)
     }
 
     pub fn is_private(self) -> bool {

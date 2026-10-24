@@ -95,6 +95,11 @@ pub enum Event {
     },
     /// Your mute settings for a server changed.
     GuildSettingsUpdate(GuildSettings),
+    /// The active threads in (part of) a server, after you gain access.
+    ThreadsSync {
+        guild_id: Snowflake,
+        threads: Vec<Channel>,
+    },
     TypingStart {
         channel_id: Snowflake,
         user_id: Snowflake,

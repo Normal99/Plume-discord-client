@@ -134,6 +134,30 @@ pub fn decode(name: &str, data: &RawValue, me: Option<Snowflake>) -> Result<Deco
             let channel: WireChannel = serde_json::from_str(json)?;
             Event::ChannelUpsert(channel.into_model(None))
         }
+        "THREAD_CREATE" | "THREAD_UPDATE" => {
+            let thread: WireChannel = serde_json::from_str(json)?;
+            if thread.is_archived() {
+                Event::ChannelDelete { id: thread.id }
+            } else {
+                Event::ChannelUpsert(thread.into_model(None))
+            }
+        }
+        "THREAD_DELETE" => {
+            let thread: WireId = serde_json::from_str(json)?;
+            Event::ChannelDelete { id: thread.id }
+        }
+        "THREAD_LIST_SYNC" => {
+            let sync: WireThreadListSync = serde_json::from_str(json)?;
+            Event::ThreadsSync {
+                guild_id: sync.guild_id,
+                threads: sync
+                    .threads
+                    .into_iter()
+                    .filter(|t| !t.is_archived())
+                    .map(|t| t.into_model(Some(sync.guild_id)))
+                    .collect(),
+            }
+        }
         "CHANNEL_DELETE" => {
             let channel: WireId = serde_json::from_str(json)?;
             Event::ChannelDelete { id: channel.id }
@@ -321,6 +345,13 @@ struct WireId {
 }
 
 #[derive(Deserialize)]
+struct WireThreadListSync {
+    guild_id: Snowflake,
+    #[serde(default)]
+    threads: Vec<WireChannel>,
+}
+
+#[derive(Deserialize)]
 struct WireMessageUpdate {
     id: Snowflake,
     channel_id: Snowflake,
@@ -350,6 +381,49 @@ mod tests {
     fn decode_str(name: &str, json: &str) -> Decoded {
         let raw = RawValue::from_string(json.to_owned()).unwrap();
         decode(name, &raw, Some(Snowflake(1))).unwrap()
+    }
+
+    #[test]
+    fn decodes_thread_events() {
+        let thread = |archived: bool| {
+            format!(
+                r#"{{"id": "50", "type": 11, "guild_id": "10", "parent_id": "100", "name": "bug hunt",
+                    "thread_metadata": {{"archived": {archived}, "locked": false}}}}"#
+            )
+        };
+        let Event::ChannelUpsert(channel) = decode_str("THREAD_CREATE", &thread(false)).event else {
+            panic!("wrong event");
+        };
+        assert_eq!(channel.kind, plume_core::models::ChannelKind::Thread);
+        assert_eq!(
+            (channel.guild_id, channel.parent_id),
+            (Some(Snowflake(10)), Some(Snowflake(100)))
+        );
+        assert!(matches!(
+            decode_str("THREAD_UPDATE", &thread(true)).event,
+            Event::ChannelDelete { id: Snowflake(50) }
+        ));
+        assert!(matches!(
+            decode_str(
+                "THREAD_DELETE",
+                r#"{"id": "50", "guild_id": "10", "parent_id": "100", "type": 11}"#
+            )
+            .event,
+            Event::ChannelDelete { id: Snowflake(50) }
+        ));
+        let sync = format!(
+            r#"{{"guild_id": "10", "threads": [{}, {}], "members": []}}"#,
+            thread(false),
+            thread(true)
+        );
+        let Event::ThreadsSync { guild_id, threads } = decode_str("THREAD_LIST_SYNC", &sync).event else {
+            panic!("wrong event");
+        };
+        assert_eq!(
+            (guild_id, threads.len()),
+            (Snowflake(10), 1),
+            "archived threads are dropped"
+        );
     }
 
     #[test]

@@ -8,7 +8,7 @@ use crossterm::event::{
     EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
 };
 use futures_util::StreamExt;
-use plume_core::models::{Emoji, Message, User};
+use plume_core::models::{ChannelKind, Emoji, Message, User};
 use plume_core::{Event, Snowflake, Store, Tier, Token};
 use plume_gateway::{Gateway, GatewayError, GatewayHandle};
 use plume_rest::{RestClient, RestError};
@@ -329,15 +329,20 @@ impl App {
             | Event::RoleUpsert { .. }
             | Event::RoleDelete { .. }
             | Event::MessageAck { .. }
-            | Event::GuildSettingsUpdate(_) => self.sidebar.mark_dirty(),
+            | Event::GuildSettingsUpdate(_)
+            | Event::ThreadsSync { .. } => self.sidebar.mark_dirty(),
             Event::MessageCreate { message, author } => {
                 self.maybe_notify(message, author);
                 // They sent it, so they're not typing any more.
                 if let Some(typers) = self.typing.get_mut(&message.channel_id) {
                     typers.retain(|(user, _)| *user != message.author_id);
                 }
-                // DMs re-sort by activity.
-                if self.store.channel(message.channel_id).is_some_and(sidebar::is_dm) {
+                // DMs and threads re-sort by activity.
+                if self
+                    .store
+                    .channel(message.channel_id)
+                    .is_some_and(|c| sidebar::is_dm(c) || c.kind == ChannelKind::Thread)
+                {
                     self.sidebar.mark_dirty();
                 }
             }
@@ -558,6 +563,9 @@ impl App {
         match entry {
             Entry::DmHeader => self.sidebar.toggle_dms(),
             Entry::Guild(id) => self.sidebar.toggle_guild(id),
+            Entry::Channel(id) if self.store.channel(id).is_some_and(|c| c.kind == ChannelKind::Forum) => {
+                self.show_error("Forums are made of posts: pick one below it");
+            }
             Entry::Dm(id) | Entry::Channel(id) => self.open_channel(id),
             Entry::ServerHeader | Entry::Category(_) => {}
         }
@@ -1551,6 +1559,58 @@ mod tests {
             author: user(3, "Bob"),
         });
         assert!(app.store.is_muted(Snowflake(101)));
+    }
+
+    #[tokio::test]
+    async fn threads_and_forums_in_the_sidebar() {
+        let mut app = demo_app();
+        let thread = |id: u64, parent: u64, name: &str, last: u64| Channel {
+            last_message_id: Some(Snowflake(last)),
+            ..channel(id, Some(10), Some(name), ChannelKind::Thread, Some(parent))
+        };
+        app.on_gateway(Event::ChannelUpsert(thread(500, 100, "old-thread", 1)));
+        app.on_gateway(Event::ChannelUpsert(thread(501, 100, "busy-thread", 9)));
+        app.on_gateway(Event::ChannelUpsert(channel(
+            300,
+            Some(10),
+            Some("ideas"),
+            ChannelKind::Forum,
+            Some(99),
+        )));
+        app.on_gateway(Event::ThreadsSync {
+            guild_id: Snowflake(10),
+            threads: vec![thread(502, 300, "first-post", 5)],
+        });
+
+        let entries = sidebar::guild_channels(&app.store, app.store.guild(Snowflake(10)).unwrap(), false);
+        let ids: Vec<u64> = entries
+            .iter()
+            .map(|e| match e {
+                Entry::Channel(id) | Entry::Category(id) => id.0,
+                _ => 0,
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            [99, 100, 501, 500, 101, 300, 502],
+            "threads under their channel, busiest first"
+        );
+
+        let screen = render(&mut app, 100, 24);
+        assert!(
+            screen.contains("↳ busy-thread") && screen.contains("▤ ideas"),
+            "{screen}"
+        );
+
+        // Forums aren't chats; their posts are.
+        app.activate(Entry::Channel(Snowflake(300)));
+        assert!(app.error.as_ref().is_some_and(|(e, _)| e.contains("pick one")));
+        app.activate(Entry::Channel(Snowflake(502)));
+        assert_eq!(app.store.active_channel(), Some(Snowflake(502)));
+
+        // Archived (deleted) threads drop out.
+        app.on_gateway(Event::ChannelDelete { id: Snowflake(501) });
+        assert!(!render(&mut app, 100, 24).contains("busy-thread"));
     }
 
     #[tokio::test]
