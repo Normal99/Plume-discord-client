@@ -19,10 +19,7 @@ pub struct Decoded {
 
 impl From<Event> for Decoded {
     fn from(event: Event) -> Self {
-        Decoded {
-            event,
-            session: None,
-        }
+        Decoded { event, session: None }
     }
 }
 
@@ -106,7 +103,7 @@ impl WireReady {
         let mut channels = Vec::new();
         let mut users: Vec<User> = self.users.into_iter().map(WireUser::into_model).collect();
 
-        for guild in self.guilds {
+        for guild in self.guilds.into_iter().filter(|g| !g.unavailable) {
             let (guild, guild_channels) = guild.into_models();
             guilds.push(guild);
             channels.extend(guild_channels);
@@ -215,7 +212,13 @@ mod tests {
         let session = decoded.session.expect("READY carries a session");
         assert_eq!(session.session_id, "abc");
 
-        let Event::Ready { me, guilds, channels, users } = decoded.event else {
+        let Event::Ready {
+            me,
+            guilds,
+            channels,
+            users,
+        } = decoded.event
+        else {
             panic!("wrong event");
         };
         assert_eq!(me.username, "me");

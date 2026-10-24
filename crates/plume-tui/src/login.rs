@@ -25,9 +25,11 @@ pub async fn login(use_token: bool) -> Result<(), Box<dyn std::error::Error>> {
         match result {
             Ok(token) => token,
             Err(AuthError::CaptchaRequired) => {
-                return Err("Discord wants a captcha for QR logins right now, and Plume doesn't solve \
+                return Err(
+                    "Discord wants a captcha for QR logins right now, and Plume doesn't solve \
                      those. Use `plume-tui login --token` instead (see the README)."
-                    .into());
+                        .into(),
+                );
             }
             Err(error) => return Err(error.into()),
         }

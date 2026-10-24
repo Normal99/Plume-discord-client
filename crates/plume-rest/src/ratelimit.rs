@@ -68,8 +68,7 @@ impl RateLimiter {
     /// Records the budget from a response's headers.
     pub fn update(&self, key: &str, headers: &HeaderMap) {
         let number = |name: &str| headers.get(name)?.to_str().ok()?.parse::<f64>().ok();
-        let (Some(remaining), Some(reset_after)) =
-            (number("x-ratelimit-remaining"), number("x-ratelimit-reset-after"))
+        let (Some(remaining), Some(reset_after)) = (number("x-ratelimit-remaining"), number("x-ratelimit-reset-after"))
         else {
             return;
         };

@@ -18,7 +18,10 @@ const GROUP_WINDOW_MS: u64 = 7 * 60 * 1000;
 const DIM: Style = Style::new().fg(Color::DarkGray);
 const CODE: Style = Style::new().fg(Color::Yellow);
 const MENTION: Style = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD);
-const MENTION_ME: Style = Style::new().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD);
+const MENTION_ME: Style = Style::new()
+    .fg(Color::Black)
+    .bg(Color::Yellow)
+    .add_modifier(Modifier::BOLD);
 const LINK: Style = Style::new().fg(Color::Blue).add_modifier(Modifier::UNDERLINED);
 const EMOJI: Style = Style::new().fg(Color::Magenta);
 
@@ -91,7 +94,10 @@ fn reply_line(store: &Store, channel_id: Snowflake, reply_to: Snowflake, width: 
 fn day_separator(time: &DateTime<Local>, width: usize) -> Line<'static> {
     let label = format!(" {} ", time.format("%a %-d %b %Y"));
     let side = width.saturating_sub(label.width()) / 2;
-    Line::from(Span::styled(format!("{}{label}{}", "─".repeat(side), "─".repeat(side)), DIM))
+    Line::from(Span::styled(
+        format!("{}{label}{}", "─".repeat(side), "─".repeat(side)),
+        DIM,
+    ))
 }
 
 /// The message body as logical lines: markdown, then attachments, then "(edited)".
@@ -146,7 +152,10 @@ fn content_lines(store: &Store, message: &Message) -> Vec<Vec<Segment>> {
 
     for attachment in &message.attachments {
         lines.push(vec![
-            (format!("📎 {} ({}) ", attachment.filename, human_size(attachment.size)), DIM),
+            (
+                format!("📎 {} ({}) ", attachment.filename, human_size(attachment.size)),
+                DIM,
+            ),
             (attachment.url.clone(), LINK),
         ]);
     }

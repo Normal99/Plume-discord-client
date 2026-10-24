@@ -43,11 +43,21 @@ pub enum QrStatus {
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum Incoming {
-    Hello { heartbeat_interval: u64 },
-    NonceProof { encrypted_nonce: String },
-    PendingRemoteInit { fingerprint: String },
-    PendingTicket { encrypted_user_payload: String },
-    PendingLogin { ticket: String },
+    Hello {
+        heartbeat_interval: u64,
+    },
+    NonceProof {
+        encrypted_nonce: String,
+    },
+    PendingRemoteInit {
+        fingerprint: String,
+    },
+    PendingTicket {
+        encrypted_user_payload: String,
+    },
+    PendingLogin {
+        ticket: String,
+    },
     HeartbeatAck,
     Cancel,
     #[serde(other)]
@@ -107,10 +117,13 @@ pub async fn qr_login(mut on_status: impl FnMut(QrStatus)) -> Result<Token, Auth
                     .to_public_key()
                     .to_public_key_der()
                     .map_err(|e| AuthError::Protocol(format!("couldn't encode public key: {e}")))?;
-                send(&mut socket, json!({
-                    "op": "init",
-                    "encoded_public_key": STANDARD.encode(public_key.as_bytes()),
-                }))
+                send(
+                    &mut socket,
+                    json!({
+                        "op": "init",
+                        "encoded_public_key": STANDARD.encode(public_key.as_bytes()),
+                    }),
+                )
                 .await?;
             }
             Incoming::NonceProof { encrypted_nonce } => {
@@ -194,10 +207,14 @@ mod tests {
     fn parses_remote_auth_messages() {
         let hello: Incoming =
             serde_json::from_str(r#"{"op":"hello","heartbeat_interval":41250,"timeout_ms":120000}"#).unwrap();
-        assert!(matches!(hello, Incoming::Hello { heartbeat_interval: 41250 }));
+        assert!(matches!(
+            hello,
+            Incoming::Hello {
+                heartbeat_interval: 41250
+            }
+        ));
 
-        let nonce: Incoming =
-            serde_json::from_str(r#"{"op":"nonce_proof","encrypted_nonce":"abc"}"#).unwrap();
+        let nonce: Incoming = serde_json::from_str(r#"{"op":"nonce_proof","encrypted_nonce":"abc"}"#).unwrap();
         assert!(matches!(nonce, Incoming::NonceProof { .. }));
 
         let unknown: Incoming = serde_json::from_str(r#"{"op":"something_new"}"#).unwrap();

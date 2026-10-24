@@ -151,7 +151,12 @@ pub async fn run(token: Token, options: Options) -> Result<(), Box<dyn Error>> {
 }
 
 impl App {
-    fn new(rest: RestClient, gateway: GatewayHandle, tasks: mpsc::UnboundedSender<TaskResult>, options: &Options) -> Self {
+    fn new(
+        rest: RestClient,
+        gateway: GatewayHandle,
+        tasks: mpsc::UnboundedSender<TaskResult>,
+        options: &Options,
+    ) -> Self {
         App {
             store: Store::new(options.profile),
             sidebar: Sidebar::default(),
@@ -208,7 +213,20 @@ impl App {
 
     fn on_gateway(&mut self, event: Event) {
         match &event {
-            Event::Ready { .. } | Event::Resumed => {
+            Event::Ready { .. } => {
+                self.connection = Connection::Online;
+                self.sidebar.mark_dirty();
+                self.store.apply(event);
+                // A new session may have missed messages in the open channel.
+                if let Some(channel_id) = self.store.active_channel()
+                    && self.store.needs_history(channel_id)
+                {
+                    self.fetch_history(channel_id);
+                }
+                self.dirty = true;
+                return;
+            }
+            Event::Resumed => {
                 self.connection = Connection::Online;
                 self.sidebar.mark_dirty();
             }
@@ -290,13 +308,17 @@ impl App {
         }
         self.typing.retain(|_, typers| !typers.is_empty());
 
-        if self.error.as_ref().is_some_and(|(_, since)| now - *since > ERROR_TIMEOUT) {
+        if self
+            .error
+            .as_ref()
+            .is_some_and(|(_, since)| now - *since > ERROR_TIMEOUT)
+        {
             self.error = None;
             self.dirty = true;
         }
 
         // While idle, check every 2 s and redraw if the shown value (0.1 MB) changed.
-        if self.ticks % 2 == 0 && shown_mb(resident_memory_kb()) != shown_mb(self.memory_kb) {
+        if self.ticks.is_multiple_of(2) && shown_mb(resident_memory_kb()) != shown_mb(self.memory_kb) {
             self.dirty = true;
         }
     }
@@ -410,15 +432,19 @@ impl App {
             self.gateway.subscribe_channel(guild_id, channel_id);
         }
         if needs_history {
-            self.loading_history = true;
-            let rest = self.rest.clone();
-            let tasks = self.tasks.clone();
-            let limit = self.history_limit;
-            tokio::spawn(async move {
-                let result = rest.messages(channel_id, limit).await;
-                let _ = tasks.send(TaskResult::History { channel_id, result });
-            });
+            self.fetch_history(channel_id);
         }
+    }
+
+    fn fetch_history(&mut self, channel_id: Snowflake) {
+        self.loading_history = true;
+        let rest = self.rest.clone();
+        let tasks = self.tasks.clone();
+        let limit = self.history_limit;
+        tokio::spawn(async move {
+            let result = rest.messages(channel_id, limit).await;
+            let _ = tasks.send(TaskResult::History { channel_id, result });
+        });
     }
 
     fn send(&mut self) {
@@ -615,7 +641,11 @@ mod tests {
             kind,
             parent_id: parent.map(Snowflake),
             position: 0,
-            recipients: if guild.is_none() { vec![Snowflake(3)] } else { Vec::new() },
+            recipients: if guild.is_none() {
+                vec![Snowflake(3)]
+            } else {
+                Vec::new()
+            },
             last_message_id: None,
         }
     }
@@ -676,7 +706,14 @@ mod tests {
         app.store.insert_history(
             Snowflake(100),
             vec![
-                (message(0, 2, "**hello** everyone, this is a *long* message that should wrap onto the next line nicely"), user(2, "Alice")),
+                (
+                    message(
+                        0,
+                        2,
+                        "**hello** everyone, this is a *long* message that should wrap onto the next line nicely",
+                    ),
+                    user(2, "Alice"),
+                ),
                 (with_file, user(2, "Alice")),
                 (ping, user(3, "Bob")),
             ],
@@ -746,7 +783,14 @@ mod tests {
             app.switcher.as_mut().unwrap().input.insert(c);
         }
         app.refilter_switcher();
-        let labels: Vec<&str> = app.switcher.as_ref().unwrap().matches.iter().map(|(_, l)| l.as_str()).collect();
+        let labels: Vec<&str> = app
+            .switcher
+            .as_ref()
+            .unwrap()
+            .matches
+            .iter()
+            .map(|(_, l)| l.as_str())
+            .collect();
         assert_eq!(labels, ["#help · Rust Hangout"]);
         println!("{}", render(&mut app, 100, 24));
     }
@@ -764,4 +808,3 @@ mod tests {
         render(&mut app, 10, 4);
     }
 }
-

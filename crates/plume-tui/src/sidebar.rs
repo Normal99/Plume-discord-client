@@ -132,7 +132,8 @@ impl Sidebar {
         self.entries.clear();
         self.entries.push(Entry::DmHeader);
         if !self.dms_collapsed {
-            self.entries.extend(sorted_dms(store).into_iter().take(MAX_DMS).map(Entry::Dm));
+            self.entries
+                .extend(sorted_dms(store).into_iter().take(MAX_DMS).map(Entry::Dm));
         }
         self.entries.push(Entry::ServerHeader);
         for guild in sorted_guilds(store) {
@@ -175,7 +176,7 @@ pub fn guild_channels(store: &Store, guild: &Guild) -> Vec<Entry> {
     let mut top: Vec<&Channel> = channels
         .iter()
         .copied()
-        .filter(|c| c.kind == ChannelKind::Text && c.parent_id.is_none())
+        .filter(|c| c.kind.is_text() && c.parent_id.is_none())
         .collect();
     top.sort_by_key(order);
 
@@ -191,7 +192,7 @@ pub fn guild_channels(store: &Store, guild: &Guild) -> Vec<Entry> {
         let mut children: Vec<&Channel> = channels
             .iter()
             .copied()
-            .filter(|c| c.kind == ChannelKind::Text && c.parent_id == Some(category.id))
+            .filter(|c| c.kind.is_text() && c.parent_id == Some(category.id))
             .collect();
         if children.is_empty() {
             continue;

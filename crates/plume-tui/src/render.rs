@@ -14,7 +14,10 @@ const DIM: Style = Style::new().fg(Color::DarkGray);
 const ACCENT: Color = Color::Rgb(88, 101, 242); // Discord blurple
 const SELECTED: Style = Style::new().bg(Color::Rgb(50, 55, 80));
 const UNREAD: Style = Style::new().fg(Color::White).add_modifier(Modifier::BOLD);
-const MENTION_BADGE: Style = Style::new().fg(Color::White).bg(Color::Red).add_modifier(Modifier::BOLD);
+const MENTION_BADGE: Style = Style::new()
+    .fg(Color::White)
+    .bg(Color::Red)
+    .add_modifier(Modifier::BOLD);
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let areas = layout::areas(frame.area(), app.focus == Focus::Sidebar);
@@ -71,7 +74,9 @@ fn sidebar_row(
         }
         Entry::ServerHeader => ("  SERVERS".to_owned(), Default::default(), DIM),
         Entry::Dm(id) => {
-            let name = store.channel(id).map_or_else(String::new, |c| sidebar::dm_name(store, c));
+            let name = store
+                .channel(id)
+                .map_or_else(String::new, |c| sidebar::dm_name(store, c));
             (format!("  @ {name}"), store.unread(id), Style::new())
         }
         Entry::Guild(id) => {
@@ -100,7 +105,10 @@ fn sidebar_row(
 
     let badge = (unread.mentions > 0).then(|| format!(" {} ", unread.mentions));
     let badge_width = badge.as_ref().map_or(0, |b| b.len() + 1);
-    let mut spans = vec![Span::styled(text::truncate(&label, width.saturating_sub(badge_width)), style)];
+    let mut spans = vec![Span::styled(
+        text::truncate(&label, width.saturating_sub(badge_width)),
+        style,
+    )];
     if let Some(badge) = badge {
         spans.push(Span::raw(" "));
         spans.push(Span::styled(badge, MENTION_BADGE));
@@ -126,7 +134,11 @@ fn draw_chat(frame: &mut Frame, app: &App, areas: &Areas) {
         format!(" {}", sidebar::channel_label(store, channel_id)),
         Style::new().add_modifier(Modifier::BOLD),
     )];
-    if let Some(guild) = store.channel(channel_id).and_then(|c| c.guild_id).and_then(|id| store.guild(id)) {
+    if let Some(guild) = store
+        .channel(channel_id)
+        .and_then(|c| c.guild_id)
+        .and_then(|id| store.guild(id))
+    {
         title.push(Span::styled(format!(" · {}", guild.name), DIM));
     }
     if app.loading_history {
@@ -152,9 +164,18 @@ fn draw_chat(frame: &mut Frame, app: &App, areas: &Areas) {
     frame.render_widget(Paragraph::new(visible), area);
 
     if scroll > 0 {
-        let note = Paragraph::new(Line::styled(" ↓ newer messages below (End) ", Style::new().fg(Color::Black).bg(Color::Yellow)))
-            .right_aligned();
-        frame.render_widget(note, Rect { height: 1, ..areas.typing });
+        let note = Paragraph::new(Line::styled(
+            " ↓ newer messages below (End) ",
+            Style::new().fg(Color::Black).bg(Color::Yellow),
+        ))
+        .right_aligned();
+        frame.render_widget(
+            note,
+            Rect {
+                height: 1,
+                ..areas.typing
+            },
+        );
     } else if let Some(typing) = app.typing_text() {
         frame.render_widget(Paragraph::new(Line::styled(format!(" {typing}"), DIM)), areas.typing);
     }
@@ -196,10 +217,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         Connection::Connecting => ("connecting…", Color::Yellow),
         Connection::Online => ("online", Color::Green),
     };
-    let mut left = vec![
-        Span::styled(" ● ", Style::new().fg(color)),
-        Span::raw(state),
-    ];
+    let mut left = vec![Span::styled(" ● ", Style::new().fg(color)), Span::raw(state)];
     if let Some(me) = app.store.me() {
         left.push(Span::styled(format!(" as {}", me.display_name()), DIM));
     }
@@ -263,7 +281,11 @@ fn draw_switcher(frame: &mut Frame, app: &App) {
         .skip(first)
         .take(rows)
         .map(|(index, (_, label))| {
-            let style = if index == switcher.selected { SELECTED } else { Style::new() };
+            let style = if index == switcher.selected {
+                SELECTED
+            } else {
+                Style::new()
+            };
             Line::styled(text::truncate(label, width), style)
         })
         .collect();

@@ -110,8 +110,12 @@ fn init_logging() {
         .init();
 }
 
-/// `$XDG_STATE_HOME/plume`, falling back to `~/.local/state/plume`.
+/// `$XDG_STATE_HOME/plume`, falling back to `~/.local/state/plume`
+/// (`%LOCALAPPDATA%\plume` on Windows).
 fn state_dir() -> Option<PathBuf> {
+    if cfg!(windows) {
+        return Some(PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("plume"));
+    }
     let base = match std::env::var_os("XDG_STATE_HOME") {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir),
         _ => PathBuf::from(std::env::var_os("HOME")?).join(".local/state"),

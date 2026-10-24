@@ -9,10 +9,16 @@ pub enum Node {
     Strikethrough(Vec<Node>),
     Spoiler(Vec<Node>),
     InlineCode(String),
-    CodeBlock { language: Option<String>, code: String },
+    CodeBlock {
+        language: Option<String>,
+        code: String,
+    },
     /// One quoted line (`> `) or the rest of the message (`>>> `).
     Quote(Vec<Node>),
-    Heading { level: u8, children: Vec<Node> },
+    Heading {
+        level: u8,
+        children: Vec<Node>,
+    },
     /// Small grey text (`-# `).
     Subtext(Vec<Node>),
     UserMention(Snowflake),
@@ -20,9 +26,16 @@ pub enum Node {
     ChannelMention(Snowflake),
     Everyone,
     Here,
-    CustomEmoji { name: String, id: Snowflake, animated: bool },
+    CustomEmoji {
+        name: String,
+        id: Snowflake,
+        animated: bool,
+    },
     /// `<t:unix:style>`; `style` is Discord's letter (R = relative, f = full…).
-    Timestamp { unix: i64, style: Option<char> },
+    Timestamp {
+        unix: i64,
+        style: Option<char>,
+    },
     Link(String),
     LineBreak,
 }
@@ -45,14 +58,24 @@ pub struct Style {
 pub enum Piece<'a> {
     Text(&'a str),
     Code(&'a str),
-    CodeBlock { language: Option<&'a str>, code: &'a str },
+    CodeBlock {
+        language: Option<&'a str>,
+        code: &'a str,
+    },
     UserMention(Snowflake),
     RoleMention(Snowflake),
     ChannelMention(Snowflake),
     Everyone,
     Here,
-    CustomEmoji { name: &'a str, id: Snowflake, animated: bool },
-    Timestamp { unix: i64, style: Option<char> },
+    CustomEmoji {
+        name: &'a str,
+        id: Snowflake,
+        animated: bool,
+    },
+    Timestamp {
+        unix: i64,
+        style: Option<char>,
+    },
     Link(&'a str),
     LineBreak,
 }
@@ -98,11 +121,33 @@ fn walk<'a>(nodes: &'a [Node], style: Style, out: &mut Vec<Span<'a>>) {
             Node::LineBreak => push(Piece::LineBreak),
             Node::Bold(children) => walk(children, Style { bold: true, ..style }, out),
             Node::Italic(children) => walk(children, Style { italic: true, ..style }, out),
-            Node::Underline(children) => walk(children, Style { underline: true, ..style }, out),
-            Node::Strikethrough(children) => walk(children, Style { strikethrough: true, ..style }, out),
+            Node::Underline(children) => walk(
+                children,
+                Style {
+                    underline: true,
+                    ..style
+                },
+                out,
+            ),
+            Node::Strikethrough(children) => walk(
+                children,
+                Style {
+                    strikethrough: true,
+                    ..style
+                },
+                out,
+            ),
             Node::Spoiler(children) => walk(children, Style { spoiler: true, ..style }, out),
             Node::Quote(children) => walk(children, Style { quote: true, ..style }, out),
-            Node::Heading { children, .. } => walk(children, Style { heading: true, bold: true, ..style }, out),
+            Node::Heading { children, .. } => walk(
+                children,
+                Style {
+                    heading: true,
+                    bold: true,
+                    ..style
+                },
+                out,
+            ),
             Node::Subtext(children) => walk(children, Style { subtext: true, ..style }, out),
         }
     }

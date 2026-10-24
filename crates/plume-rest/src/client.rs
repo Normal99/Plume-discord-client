@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use plume_core::identity::USER_AGENT;
 use plume_core::models::{Message, User};
 use plume_core::wire::{WireMessage, WireUser};
 use plume_core::{Snowflake, Token};
@@ -16,10 +17,6 @@ use crate::ratelimit::RateLimiter;
 use crate::routes::Route;
 
 const API_BASE: &str = "https://discord.com/api/v9";
-
-/// How Plume identifies itself over HTTP. Kept in this one place so it's
-/// easy to update (see docs/04-discord-protocol.md, "Client identity").
-pub const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
 
 const MAX_ATTEMPTS: u32 = 3;
 
@@ -100,7 +97,11 @@ impl RestClient {
         Ok(())
     }
 
-    async fn request<T: DeserializeOwned>(&self, route: Route, body: Option<serde_json::Value>) -> Result<T, RestError> {
+    async fn request<T: DeserializeOwned>(
+        &self,
+        route: Route,
+        body: Option<serde_json::Value>,
+    ) -> Result<T, RestError> {
         self.request_with_query(route, "", body).await
     }
 
