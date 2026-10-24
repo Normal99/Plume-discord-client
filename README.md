@@ -6,6 +6,12 @@ A lightweight, **native** Discord client with selectable weight: 🪶 Feather (5
 
 > ⚠️ Third-party clients break Discord's Terms of Service. Use at your own risk. See [10-risks.md](docs/10-risks.md).
 
+## Try it
+
+Download a build for Linux, Windows or macOS from the latest **CI** run in the
+Actions tab (see [PROGRESS.md](PROGRESS.md) for steps and what's new), or
+build it yourself:
+
 ## Quick start
 
 ```bash
@@ -29,7 +35,7 @@ read -rs DISCORD_TOKEN && export DISCORD_TOKEN
 | Sidebar | `↑`/`↓` or `j`/`k` move · `Enter`/`→` open or expand · `←` collapse · `i` start typing |
 | Input | `Enter` send · `Esc` back to sidebar · `End` (empty box) jump to newest · `Ctrl+W` delete word · `Ctrl+U` clear |
 
-Options: `--profile feather|standard|full` (how much to keep in memory), `--silent-typing`. Logs go to `~/.local/state/plume/plume-tui.log`.
+Options: `--profile feather|standard|full` (how much to keep in memory), `--silent-typing`. Logs go to `~/.local/state/plume/plume-tui.log` (`%LOCALAPPDATA%\plume` on Windows).
 
 ## Crates
 
