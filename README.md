@@ -6,13 +6,21 @@ A lightweight, **native** Discord client with selectable weight: 🪶 Feather (5
 
 > ⚠️ Third-party clients break Discord's Terms of Service. Use at your own risk. See [10-risks.md](docs/10-risks.md).
 
-## Try it
+## Install
 
-Download a build for Linux, Windows or macOS from the latest **CI** run in the
-Actions tab (see [PROGRESS.md](PROGRESS.md) for steps and what's new), or
-build it yourself:
+Download the file for your system from the [latest release](../../releases/latest),
+unpack it, and run `plume-tui` in a terminal. The first run walks you through
+logging in: scan the QR code with the Discord app on your phone
+(Settings → Scan QR Code).
 
-## Quick start
+- **Windows:** `plume-tui-…-windows-x86_64.zip`. Windows Terminal works best. If SmartScreen warns, choose "More info" → "Run anyway".
+- **macOS:** `…-macos-arm64` for M1 and later, `…-macos-x86_64` for Intel. The build isn't signed, so run `xattr -d com.apple.quarantine plume-tui` once.
+- **Linux:** `…-linux-x86_64`, a static build for any distribution.
+
+Want the newest work in progress? Each CI run in the Actions tab has builds too
+(you need to be signed in to GitHub). See [PROGRESS.md](PROGRESS.md) for what's new.
+
+## Build it yourself
 
 ```bash
 cargo build --release -p plume-tui

@@ -69,6 +69,12 @@ impl Default for Options {
 async fn main() {
     if let Err(error) = run().await {
         eprintln!("error: {error}");
+        // Started by double-clicking, the window would vanish before the
+        // error could be read.
+        if cfg!(windows) {
+            eprintln!("Press Enter to close.");
+            let _ = std::io::stdin().read_line(&mut String::new());
+        }
         std::process::exit(1);
     }
 }
@@ -93,9 +99,17 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let token = match plume_auth::token_from_env() {
         Some(token) => token,
-        None => tokio::task::spawn_blocking(plume_auth::keyring::load_token)
-            .await??
-            .ok_or("not logged in yet. Run `plume-tui login` first")?,
+        None => match tokio::task::spawn_blocking(plume_auth::keyring::load_token).await?? {
+            Some(token) => token,
+            None => {
+                // First run: log in, then carry on into the client.
+                println!("You're not logged in yet, so let's do that first.\n");
+                login::login(false).await?;
+                tokio::task::spawn_blocking(plume_auth::keyring::load_token)
+                    .await??
+                    .ok_or("the login didn't save a token")?
+            }
+        },
     };
     app::run(token, options).await
 }

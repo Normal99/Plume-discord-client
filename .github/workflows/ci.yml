@@ -38,30 +38,38 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Static (musl), so it runs on any Linux distribution.
           - name: linux-x86_64
             os: ubuntu-latest
             exe: plume-tui
+            target: x86_64-unknown-linux-musl
           - name: windows-x86_64
             os: windows-latest
             exe: plume-tui.exe
+            target: x86_64-pc-windows-msvc
           - name: macos-arm64
             os: macos-latest
             exe: plume-tui
+            target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release
-      - run: cargo build --release --locked -p plume-tui
+          key: release-${{ matrix.target }}
+      - if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --locked -p plume-tui --target ${{ matrix.target }}
       - name: Package
         shell: bash
         run: |
           mkdir -p dist
-          cp "target/release/${{ matrix.exe }}" dist/
+          cp "target/${{ matrix.target }}/release/${{ matrix.exe }}" dist/
           cp README.md LICENSE dist/
-          size=$(wc -c < "target/release/${{ matrix.exe }}")
+          size=$(wc -c < "target/${{ matrix.target }}/release/${{ matrix.exe }}")
           echo "### plume-tui (${{ matrix.name }}): $((size / 1024)) KB" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:

@@ -26,6 +26,18 @@ Windows). If something breaks, that file is the most useful thing to send.
 
 ## Changelog
 
+### Milestone 6: ready to share (in review)
+
+- **Releases:** pushing a version tag (like `v0.2.0`) publishes a GitHub
+  Release that anyone can download, no GitHub account needed. Builds:
+  Windows, macOS Apple Silicon, macOS Intel, and Linux, with checksums.
+- **Linux builds are static** (musl), so they run on any distribution. They
+  also use less memory: ~3.1 MB after a heavy login instead of ~5.3 MB.
+- **First run logs you in:** starting `plume-tui` without a saved login now
+  opens the QR login and then the client, so friends only need one command.
+- **Windows:** if it's started by double-clicking and hits an error, the
+  window stays open so the message can be read.
+
 ### Milestone 5: files and settings (in review)
 
 - **Send files:** type `/upload <file>` in the message box, optionally followed
