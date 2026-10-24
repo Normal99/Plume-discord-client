@@ -303,7 +303,9 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         None => Span::styled(
             match app.focus {
                 Focus::Sidebar => "  ↑↓ move · Enter open · L locked channels · Tab type · Ctrl+K jump · Ctrl+C quit",
-                Focus::Input => "  Enter send · ↑ pick a message · Esc sidebar · PgUp/PgDn scroll · Ctrl+K jump",
+                Focus::Input => {
+                    "  Enter send · /upload <file> · ↑ pick a message · Esc sidebar · PgUp/PgDn scroll · Ctrl+K jump"
+                }
                 Focus::Messages => {
                     "  r reply · e edit · d delete · + react · 1-9 toggle reaction · o open link · Esc back"
                 }

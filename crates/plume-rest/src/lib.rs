@@ -8,6 +8,6 @@ mod errors;
 mod ratelimit;
 mod routes;
 
-pub use client::{RestClient, build_http_client};
+pub use client::{MAX_UPLOAD_BYTES, RestClient, build_http_client};
 pub use errors::RestError;
 pub use plume_core::identity::USER_AGENT;

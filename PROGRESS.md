@@ -26,6 +26,18 @@ Windows). If something breaks, that file is the most useful thing to send.
 
 ## Changelog
 
+### Milestone 5: files and settings (in review)
+
+- **Send files:** type `/upload <file>` in the message box, optionally followed
+  by a message (`/upload ~/cat.png look at him`). Quoted paths work, so you
+  can drag a file into the terminal. Uses reply mode if you're replying.
+  Files over 10 MB are refused before uploading. If it fails, the command
+  goes back in the box.
+- **Settings file:** `plume-tui config` creates and shows `config.toml`
+  (`~/.config/plume/` on Linux/macOS, `%APPDATA%\plume\` on Windows) with
+  `profile`, `silent_typing`, `notifications` and `show_locked`. Typos are
+  reported with the line number. Command-line options still win.
+
 ### Milestone 4: speed and size (in review)
 
 - **Smaller download:** the release build is 5.3 MB, down from 8.3 MB

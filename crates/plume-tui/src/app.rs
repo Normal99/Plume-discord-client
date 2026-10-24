@@ -103,6 +103,8 @@ enum TaskResult {
         action: &'static str,
         result: Result<(), RestError>,
     },
+    /// Something failed before reaching Discord (e.g. reading a file).
+    Failed { text: String, error: String },
     /// There's no desktop notification service; ask the terminal instead.
     NotifyInTerminal { title: String, body: String },
 }
@@ -388,7 +390,12 @@ impl App {
             }
             TaskResult::Sent { text, result } => match result {
                 // Store it now; the gateway's copy of the same message is ignored.
-                Ok((message, author)) => self.store.apply(Event::MessageCreate { message, author }),
+                Ok((message, author)) => {
+                    if self.error.as_ref().is_some_and(|(e, _)| e.starts_with("Uploading")) {
+                        self.error = None;
+                    }
+                    self.store.apply(Event::MessageCreate { message, author });
+                }
                 Err(error) => {
                     self.show_error(format!("Couldn't send: {error}"));
                     if self.input.is_empty() {
@@ -396,6 +403,12 @@ impl App {
                     }
                 }
             },
+            TaskResult::Failed { text, error } => {
+                self.show_error(error);
+                if self.input.is_empty() {
+                    self.input.set(text);
+                }
+            }
             TaskResult::Edited { text, result } => match result {
                 Ok((message, _)) => self.store.apply(Event::MessageUpdate {
                     id: message.id,
@@ -781,6 +794,10 @@ impl App {
             self.compose = Compose::Message;
             return;
         }
+        if let Some(upload) = crate::upload::parse(&text) {
+            self.upload(channel_id, text.clone(), upload);
+            return;
+        }
         if text.is_empty() {
             if let Compose::Edit(_) = self.compose {
                 self.show_error("Empty message: press Esc to cancel, or pick it with ↑ and press d to delete");
@@ -814,6 +831,45 @@ impl App {
                     let result = rest.send_message(channel_id, &text, None).await;
                     TaskResult::Sent { text, result }
                 }
+            };
+            let _ = tasks.send(task);
+        });
+    }
+
+    fn upload(
+        &mut self,
+        channel_id: Snowflake,
+        text: String,
+        parsed: Result<(std::path::PathBuf, String), &'static str>,
+    ) {
+        let (path, caption) = match parsed {
+            Ok(parsed) => parsed,
+            Err(error) => return self.show_error(error),
+        };
+        let reply_to = match self.compose {
+            Compose::Edit(_) => return self.show_error("Files can't be added to an edit"),
+            Compose::Reply(message_id) => Some(message_id),
+            Compose::Message | Compose::React(_) => None,
+        };
+        let caption = plume_markdown::replace_shortcodes(&caption);
+        self.input.take();
+        self.compose = Compose::Message;
+        self.scroll = 0;
+        self.show_error(format!("Uploading {}…", path.display()));
+        let rest = self.rest.clone();
+        let tasks = self.tasks.clone();
+        tokio::spawn(async move {
+            let file = tokio::task::spawn_blocking(move || crate::upload::read(&path)).await;
+            let task = match file {
+                Ok(Ok((name, data))) => {
+                    let result = rest.upload(channel_id, &name, data, &caption, reply_to).await;
+                    TaskResult::Sent { text, result }
+                }
+                Ok(Err(error)) => TaskResult::Failed { text, error },
+                Err(error) => TaskResult::Failed {
+                    text,
+                    error: format!("Upload failed: {error}"),
+                },
             };
             let _ = tasks.send(task);
         });
@@ -1495,6 +1551,25 @@ mod tests {
             author: user(3, "Bob"),
         });
         assert!(app.store.is_muted(Snowflake(101)));
+    }
+
+    #[tokio::test]
+    async fn upload_command() {
+        let mut app = demo_app();
+        app.focus = Focus::Input;
+        app.input.set("/upload".into());
+        press(&mut app, KeyCode::Enter);
+        assert!(app.error.as_ref().is_some_and(|(e, _)| e.starts_with("Usage")));
+        assert_eq!(app.input.text(), "/upload", "kept so it can be fixed");
+
+        // A failed read puts the command back in the box.
+        app.input.take();
+        app.on_task(TaskResult::Failed {
+            text: "/upload missing.png".into(),
+            error: "Can't open missing.png".into(),
+        });
+        assert_eq!(app.input.text(), "/upload missing.png");
+        assert!(render(&mut app, 100, 24).contains("Can't open missing.png"));
     }
 
     #[tokio::test]

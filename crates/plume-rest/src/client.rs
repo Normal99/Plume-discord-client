@@ -1,11 +1,12 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use bytes::Bytes;
 use plume_core::identity::USER_AGENT;
 use plume_core::models::{Message, User};
 use plume_core::wire::{WireMessage, WireUser};
 use plume_core::{Snowflake, Token};
-use reqwest::header::{AUTHORIZATION, HeaderValue};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 use reqwest::{Response, StatusCode};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -19,6 +20,19 @@ use crate::routes::{Route, encode_emoji};
 const API_BASE: &str = "https://discord.com/api/v9";
 
 const MAX_ATTEMPTS: u32 = 3;
+
+/// The largest file a free account can upload.
+pub const MAX_UPLOAD_BYTES: usize = 10 * 1024 * 1024;
+
+/// What a request carries.
+enum Body {
+    Json(serde_json::Value),
+    /// A ready-made `multipart/form-data` body and its boundary.
+    Multipart {
+        boundary: String,
+        bytes: Bytes,
+    },
+}
 
 /// An HTTP client with our TLS setup and user agent, for any Discord request.
 pub fn build_http_client() -> reqwest::Result<reqwest::Client> {
@@ -105,6 +119,36 @@ impl RestClient {
         Ok(wire.into_models())
     }
 
+    /// Sends a file, with optional text, optionally as a reply.
+    pub async fn upload(
+        &self,
+        channel_id: Snowflake,
+        filename: &str,
+        data: Vec<u8>,
+        content: &str,
+        reply_to: Option<Snowflake>,
+    ) -> Result<(Message, User), RestError> {
+        let mut payload = json!({
+            "content": content,
+            "nonce": now_snowflake().to_string(),
+            "attachments": [{ "id": "0", "filename": filename }],
+        });
+        if let Some(message_id) = reply_to {
+            payload["message_reference"] = json!({ "message_id": message_id });
+        }
+        let boundary = format!("plume{}", now_snowflake());
+        let bytes = multipart(&boundary, &payload.to_string(), filename, &data);
+        let response = self
+            .send(
+                Route::CreateMessage { channel_id },
+                "",
+                Some(Body::Multipart { boundary, bytes }),
+            )
+            .await?;
+        let wire: WireMessage = serde_json::from_slice(&response.bytes().await?)?;
+        Ok(wire.into_models())
+    }
+
     /// Changes the text of one of your messages.
     pub async fn edit_message(
         &self,
@@ -126,7 +170,8 @@ impl RestClient {
     /// Marks the channel read up to `message_id`, so other devices agree.
     pub async fn ack(&self, channel_id: Snowflake, message_id: Snowflake) -> Result<(), RestError> {
         let body = json!({ "token": null });
-        self.send(Route::Ack { channel_id, message_id }, "", Some(body)).await?;
+        self.send(Route::Ack { channel_id, message_id }, "", Some(Body::Json(body)))
+            .await?;
         Ok(())
     }
 
@@ -178,13 +223,13 @@ impl RestClient {
         query: &str,
         body: Option<serde_json::Value>,
     ) -> Result<T, RestError> {
-        let response = self.send(route, query, body).await?;
+        let response = self.send(route, query, body.map(Body::Json)).await?;
         let bytes = response.bytes().await?;
         Ok(serde_json::from_slice(&bytes)?)
     }
 
     /// Sends a request through the rate limiter, retrying on 429.
-    async fn send(&self, route: Route, query: &str, body: Option<serde_json::Value>) -> Result<Response, RestError> {
+    async fn send(&self, route: Route, query: &str, body: Option<Body>) -> Result<Response, RestError> {
         let key = route.bucket_key();
         let path = route.path();
         let method = route.method();
@@ -198,8 +243,14 @@ impl RestClient {
                 .http
                 .request(method.clone(), &url)
                 .header(AUTHORIZATION, self.inner.auth.clone());
-            if let Some(body) = &body {
-                request = request.json(body);
+            match &body {
+                Some(Body::Json(json)) => request = request.json(json),
+                Some(Body::Multipart { boundary, bytes }) => {
+                    request = request
+                        .header(CONTENT_TYPE, format!("multipart/form-data; boundary={boundary}"))
+                        .body(bytes.clone()); // cheap: `Bytes` is reference counted
+                }
+                None => {}
             }
             debug!("{method} {path}");
             let response = request.send().await?;
@@ -243,10 +294,47 @@ struct ApiError {
     message: String,
 }
 
+/// A `multipart/form-data` body with the JSON payload and one file.
+fn multipart(boundary: &str, payload: &str, filename: &str, data: &[u8]) -> Bytes {
+    // Quotes and line breaks would break out of the header.
+    let filename: String = filename
+        .chars()
+        .map(|c| if c == '"' || c.is_control() { '_' } else { c })
+        .collect();
+    let mut body = Vec::with_capacity(data.len() + payload.len() + 512);
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"payload_json\"\r\n\
+             Content-Type: application/json\r\n\r\n{payload}\r\n\
+             --{boundary}\r\nContent-Disposition: form-data; name=\"files[0]\"; filename=\"{filename}\"\r\n\
+             Content-Type: application/octet-stream\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(data);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    Bytes::from(body)
+}
+
 fn now_snowflake() -> Snowflake {
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     Snowflake::from_timestamp_ms(now_ms)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn multipart_body_has_both_parts_and_a_safe_filename() {
+        let body = multipart("XYZ", r#"{"content":"hi"}"#, "evil\"\r\nname.txt", b"\x00data");
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.starts_with("--XYZ\r\nContent-Disposition: form-data; name=\"payload_json\"\r\n"));
+        assert!(text.contains("\r\n\r\n{\"content\":\"hi\"}\r\n--XYZ\r\n"));
+        assert!(text.contains("name=\"files[0]\"; filename=\"evil___name.txt\"\r\n"));
+        assert!(text.ends_with("\r\n\r\n\u{0}data\r\n--XYZ--\r\n"));
+    }
 }

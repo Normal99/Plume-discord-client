@@ -2070,6 +2070,7 @@ dependencies = [
 name = "plume-rest"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "plume-core",
  "reqwest",
  "rustls",

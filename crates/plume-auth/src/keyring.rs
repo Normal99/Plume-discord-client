@@ -77,9 +77,8 @@ pub fn delete_token() -> Result<(), AuthError> {
     Ok(())
 }
 
-/// `$XDG_CONFIG_HOME/plume/token`, `~/.config/plume/token`, or
-/// `%APPDATA%\plume\token` on Windows.
-pub fn token_file() -> Option<PathBuf> {
+/// `$XDG_CONFIG_HOME/plume`, `~/.config/plume`, or `%APPDATA%\plume` on Windows.
+pub fn config_dir() -> Option<PathBuf> {
     let base = if cfg!(windows) {
         PathBuf::from(std::env::var_os("APPDATA")?)
     } else {
@@ -88,7 +87,12 @@ pub fn token_file() -> Option<PathBuf> {
             _ => PathBuf::from(std::env::var_os("HOME")?).join(".config"),
         }
     };
-    Some(base.join("plume").join("token"))
+    Some(base.join("plume"))
+}
+
+/// Where the token goes when there's no keyring: `token` in [`config_dir`].
+pub fn token_file() -> Option<PathBuf> {
+    Some(config_dir()?.join("token"))
 }
 
 fn load_file() -> Result<Option<Token>, AuthError> {
