@@ -32,6 +32,7 @@ Options:
                      channels and messages to keep in memory
   --silent-typing    don't tell others when you're typing
   --no-notifications no desktop notifications for DMs and mentions
+  --show-locked      also list channels you can't read (toggle with L)
   --help             show this help
 
 Logs go to ~/.local/state/plume/plume-tui.log (set RUST_LOG=debug for more).";
@@ -41,6 +42,7 @@ pub struct Options {
     pub profile: Profile,
     pub silent_typing: bool,
     pub notifications: bool,
+    pub show_locked: bool,
 }
 
 // One thread is plenty for a chat client and keeps memory low (Feather).
@@ -81,6 +83,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         profile: Profile::FEATHER,
         silent_typing: false,
         notifications: true,
+        show_locked: false,
     };
     let mut args = args.iter();
     while let Some(arg) = args.next() {
@@ -92,6 +95,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
             }
             "--silent-typing" => options.silent_typing = true,
             "--no-notifications" => options.notifications = false,
+            "--show-locked" => options.show_locked = true,
             other => return Err(format!("unknown option `{other}`. See --help")),
         }
     }

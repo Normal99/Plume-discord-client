@@ -32,13 +32,13 @@ read -rs DISCORD_TOKEN && export DISCORD_TOKEN
 | Where | Keys |
 |---|---|
 | Anywhere | `Tab` switch sidebar/input · `Ctrl+K` jump to a channel · `PgUp`/`PgDn` scroll · `Ctrl+C` quit |
-| Sidebar | `↑`/`↓` or `j`/`k` move · `Enter`/`→` open or expand · `←` collapse · `i` start typing |
+| Sidebar | `↑`/`↓` or `j`/`k` move · `Enter`/`→` open or expand · `←` collapse · `L` show/hide locked channels · `i` start typing |
 | Input | `Enter` send · `↑` (empty box) pick a message · `Esc` back to sidebar (or cancel a reply/edit) · `End` (empty box) jump to newest · `Ctrl+W` delete word · `Ctrl+U` clear |
 | Picking a message | `↑`/`↓` move (going past the top loads older messages) · `r` reply · `e` edit yours · `d` delete · `+` react · `1`–`9` toggle that reaction · `o` open its link or attachment · `Esc` back |
 
 Type `:fire:`-style shortcodes and they're sent as emoji.
 
-Options: `--profile feather|standard|full` (how much to keep in memory), `--silent-typing`, `--no-notifications`. Logs go to `~/.local/state/plume/plume-tui.log` (`%LOCALAPPDATA%\plume` on Windows).
+Options: `--profile feather|standard|full` (how much to keep in memory), `--silent-typing`, `--no-notifications`, `--show-locked` (also list channels you can't read; toggle with `L` in the sidebar). Logs go to `~/.local/state/plume/plume-tui.log` (`%LOCALAPPDATA%\plume` on Windows).
 
 ## Crates
 

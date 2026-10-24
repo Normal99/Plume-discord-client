@@ -52,6 +52,9 @@ pub struct Store {
     last_read: HashMap<Snowflake, Snowflake>,
     /// Muted servers, channels and categories.
     muted: HashSet<Snowflake>,
+    /// Bumped on every change that could alter what's shown, so frontends
+    /// can cache what they render.
+    revision: u64,
 }
 
 impl Store {
@@ -68,7 +71,14 @@ impl Store {
             unread: HashMap::new(),
             last_read: HashMap::new(),
             muted: HashSet::new(),
+            revision: 0,
         }
+    }
+
+    /// Changes whenever something visible may have changed (not for typing
+    /// indicators or events nothing uses).
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     // ---- Reading ------------------------------------------------------------
@@ -194,6 +204,7 @@ impl Store {
     /// Makes a channel the one being looked at and marks it read. Returns
     /// true if its messages need fetching.
     pub fn open_channel(&mut self, channel_id: Snowflake) -> bool {
+        self.revision += 1;
         // Leaving a channel drops what was loaded by scrolling up.
         let limit = self.message_limit();
         if let Some(previous) = self.active.filter(|&id| id != channel_id)
@@ -228,6 +239,7 @@ impl Store {
     /// Stores a page of messages older than what's cached, from scrolling
     /// up. A page shorter than `requested` means the start was reached.
     pub fn insert_older(&mut self, channel_id: Snowflake, page: Vec<(Message, User)>, requested: usize) {
+        self.revision += 1;
         let hard_cap = self.message_limit() * MAX_SCROLLBACK_FACTOR;
         let Some(history) = self.histories.get_mut(&channel_id) else {
             return;
@@ -277,6 +289,7 @@ impl Store {
     /// Stores a page of fetched messages (any order), merged with whatever
     /// arrived live in the meantime.
     pub fn insert_history(&mut self, channel_id: Snowflake, page: Vec<(Message, User)>) {
+        self.revision += 1;
         let limit = self.profile.messages_per_channel.max(1);
         let mut incoming = Vec::with_capacity(page.len());
         for (message, author) in page {
@@ -308,6 +321,9 @@ impl Store {
     }
 
     pub fn apply(&mut self, event: Event) {
+        if !matches!(event, Event::TypingStart { .. } | Event::Other(_)) {
+            self.revision += 1;
+        }
         match event {
             Event::Ready {
                 me,

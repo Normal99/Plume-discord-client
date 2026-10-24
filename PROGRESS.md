@@ -26,6 +26,21 @@ Windows). If something breaks, that file is the most useful thing to send.
 
 ## Changelog
 
+### Milestone 4: speed and size (in review)
+
+- **Smaller download:** the release build is 5.3 MB, down from 8.3 MB
+  (size-optimised, no unwinding). The terminal is still restored on a crash.
+- **Typing no longer redraws the chat:** the message view is cached and only
+  rebuilt when something changes. A 500-message frame drops from 3.9 ms to
+  0.6 ms.
+- **Memory after login:** a synthetic heavy account (100 servers × 60
+  channels, 300 DMs, a 4.3 MB READY) loads in ~27 ms and settles at ~5.3 MB
+  RSS; spare heap is handed back to the OS after login (Linux).
+  Try it: `cargo run --release -p plume-gateway --example ready_bench`.
+- **Locked channels (optional):** press `L` in the sidebar (or start with
+  `--show-locked`) to also list channels you can't read, with a 🔒. Opening one
+  shows a notice instead of an error. Press `L` again to hide them.
+
 ### Milestone 3: reliability (in review)
 
 - **Login without a system keyring:** on servers, WSL or minimal Linux

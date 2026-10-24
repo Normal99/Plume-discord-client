@@ -23,6 +23,8 @@ pub struct Sidebar {
     selected: usize,
     expanded: HashSet<Snowflake>,
     dms_collapsed: bool,
+    /// List channels we can't read too (with a lock), like Discord's "show all channels".
+    show_locked: bool,
     dirty: bool,
     /// Entry to select after the next rebuild (it may not exist yet).
     pending_select: Option<Entry>,
@@ -38,6 +40,7 @@ impl Default for Sidebar {
             selected: 0,
             expanded: HashSet::new(),
             dms_collapsed: false,
+            show_locked: false,
             dirty: true,
             pending_select: None,
         }
@@ -63,6 +66,15 @@ impl Sidebar {
 
     pub fn dms_collapsed(&self) -> bool {
         self.dms_collapsed
+    }
+
+    pub fn shows_locked(&self) -> bool {
+        self.show_locked
+    }
+
+    pub fn set_show_locked(&mut self, show: bool) {
+        self.show_locked = show;
+        self.dirty = true;
     }
 
     pub fn mark_dirty(&mut self) {
@@ -139,7 +151,7 @@ impl Sidebar {
         for guild in sorted_guilds(store) {
             self.entries.push(Entry::Guild(guild.id));
             if self.expanded.contains(&guild.id) {
-                self.entries.extend(guild_channels(store, guild));
+                self.entries.extend(guild_channels(store, guild, self.show_locked));
             }
         }
 
@@ -169,12 +181,13 @@ pub fn sorted_guilds(store: &Store) -> Vec<&Guild> {
 
 /// A server's text channels in Discord's order: uncategorised ones first,
 /// then each category followed by its channels. Empty categories are skipped.
-pub fn guild_channels(store: &Store, guild: &Guild) -> Vec<Entry> {
+/// Channels we can't read are left out unless `show_locked` is set.
+pub fn guild_channels(store: &Store, guild: &Guild, show_locked: bool) -> Vec<Entry> {
     let channels: Vec<&Channel> = guild
         .channels
         .iter()
         .filter_map(|&id| store.channel(id))
-        .filter(|c| c.kind == ChannelKind::Category || store.can_view(c.id))
+        .filter(|c| show_locked || c.kind == ChannelKind::Category || store.can_view(c.id))
         .collect();
     let order = |c: &&Channel| (c.position, c.id);
 

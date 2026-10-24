@@ -5,7 +5,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, Paragraph};
 
-use crate::app::{App, Compose, Connection, Focus};
+use crate::app::{App, Compose, Connection, Focus, ViewKey};
 use crate::layout::{self, Areas};
 use crate::sidebar::{self, Entry};
 use crate::text;
@@ -94,6 +94,10 @@ fn sidebar_row(
         }
         Entry::Channel(id) => {
             let name = store.channel(id).and_then(|c| c.name.as_deref()).unwrap_or("?");
+            if !store.can_view(id) {
+                // Same width as "    # ": the lock is two columns wide.
+                return Line::styled(text::truncate(&format!("   🔒 {name}"), width), DIM);
+            }
             let base = if store.is_muted(id) {
                 DIM
             } else {
@@ -162,12 +166,24 @@ fn draw_chat(frame: &mut Frame, app: &mut App, areas: &Areas) {
     } else {
         None
     };
-    let view = text::channel_lines(store, channel_id, areas.messages.width, selected);
-    let lines = view.lines;
+    // Rebuilt only when the store, the width or the minute changes (the
+    // minute because of relative timestamps), not on every key press.
+    let key = ViewKey {
+        channel: channel_id,
+        width: areas.messages.width,
+        revision: store.revision(),
+        minute: chrono::Utc::now().timestamp() / 60,
+    };
+    let view = match app.view_cache.take() {
+        Some((cached_key, view)) if cached_key == key => view,
+        _ => text::channel_lines(store, channel_id, areas.messages.width),
+    };
+    let lines = &view.lines;
+    let selected_range = selected.and_then(|id| view.range_of(id));
     let height = usize::from(areas.messages.height);
     let max_scroll = lines.len().saturating_sub(height);
     // Keep the selected message on screen (its start, if it's taller than the screen).
-    if let Some((start, end)) = view.selected {
+    if let Some((start, end)) = selected_range {
         let bottom = lines.len() - app.scroll.min(lines.len());
         if end > bottom {
             app.scroll = lines.len() - end;
@@ -181,7 +197,13 @@ fn draw_chat(frame: &mut Frame, app: &mut App, areas: &Areas) {
     app.at_top = scroll >= max_scroll;
     let end = lines.len() - scroll;
     let start = end.saturating_sub(height);
-    let visible: Vec<Line> = lines[start..end].to_vec();
+    let visible: Vec<Line> = (start..end)
+        .map(|index| match selected_range {
+            Some((first, last)) if (first..last).contains(&index) => text::highlight(lines[index].clone()),
+            _ => lines[index].clone(),
+        })
+        .collect();
+    app.view_cache = Some((key, view));
     // Pad from the top so a short history still sits at the bottom.
     let padding = height.saturating_sub(visible.len()) as u16;
     let area = Rect {
@@ -280,7 +302,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         Some((error, _)) => Span::styled(format!("  {error}"), Style::new().fg(Color::Red)),
         None => Span::styled(
             match app.focus {
-                Focus::Sidebar => "  ↑↓ move · Enter open · Tab type · Ctrl+K jump · Ctrl+C quit",
+                Focus::Sidebar => "  ↑↓ move · Enter open · L locked channels · Tab type · Ctrl+K jump · Ctrl+C quit",
                 Focus::Input => "  Enter send · ↑ pick a message · Esc sidebar · PgUp/PgDn scroll · Ctrl+K jump",
                 Focus::Messages => {
                     "  r reply · e edit · d delete · + react · 1-9 toggle reaction · o open link · Esc back"

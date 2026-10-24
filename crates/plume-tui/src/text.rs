@@ -39,20 +39,37 @@ const NAME_COLORS: [Color; 6] = [
     Color::LightCyan,
 ];
 
-/// A channel's messages as terminal lines.
+/// A channel's messages as terminal lines. Building it parses every
+/// message's markdown, so the renderer caches it until the store changes.
 pub struct ChannelView {
     pub lines: Vec<Line<'static>>,
-    /// Which lines belong to the selected message: `start..end`.
-    pub selected: Option<(usize, usize)>,
+    /// Which lines belong to each message: `(id, start, end)`, oldest first.
+    pub ranges: Vec<(Snowflake, usize, usize)>,
 }
 
-/// Every line for a channel's cached messages, oldest first, with the
-/// `selected` message highlighted.
-pub fn channel_lines(store: &Store, channel_id: Snowflake, width: u16, selected: Option<Snowflake>) -> ChannelView {
+impl ChannelView {
+    /// The lines (`start..end`) of one message.
+    pub fn range_of(&self, id: Snowflake) -> Option<(usize, usize)> {
+        let index = self.ranges.binary_search_by_key(&id, |r| r.0).ok()?;
+        let (_, start, end) = self.ranges[index];
+        Some((start, end))
+    }
+}
+
+/// Every line for a channel's cached messages, oldest first.
+pub fn channel_lines(store: &Store, channel_id: Snowflake, width: u16) -> ChannelView {
     let width = usize::from(width).max(INDENT + 10);
     let mut lines = Vec::new();
-    let mut selected_range = None;
+    let mut ranges = Vec::with_capacity(store.messages(channel_id).len());
     let mut previous: Option<&Message> = None;
+
+    if !store.can_view(channel_id) {
+        lines.push(Line::styled(
+            "🔒 You don't have permission to read this channel.",
+            Style::new().add_modifier(Modifier::DIM),
+        ));
+        return ChannelView { lines, ranges };
+    }
 
     for message in store.messages(channel_id) {
         let time = local_time(message.timestamp_ms());
@@ -82,18 +99,15 @@ pub fn channel_lines(store: &Store, channel_id: Snowflake, width: u16, selected:
             lines.extend(wrap(&reaction_segments(message), width, INDENT));
         }
 
-        if Some(message.id) == selected {
-            for line in &mut lines[start..] {
-                *line = std::mem::take(line).patch_style(SELECTED);
-            }
-            selected_range = Some((start, lines.len()));
-        }
+        ranges.push((message.id, start, lines.len()));
         previous = Some(message);
     }
-    ChannelView {
-        lines,
-        selected: selected_range,
-    }
+    ChannelView { lines, ranges }
+}
+
+/// Highlights a line of the selected message.
+pub fn highlight(line: Line<'static>) -> Line<'static> {
+    line.patch_style(SELECTED)
 }
 
 /// "👍 3  :blob: 1", with your own reactions highlighted.

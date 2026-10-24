@@ -20,6 +20,7 @@ use crate::Options;
 use crate::input::Input;
 use crate::render;
 use crate::sidebar::{self, Entry, Sidebar};
+use crate::text;
 
 /// Discord's limit for one message (without Nitro).
 const MAX_MESSAGE_LENGTH: usize = 2000;
@@ -58,6 +59,15 @@ pub enum Compose {
     Edit(Snowflake),
     /// The box holds an emoji to react with.
     React(Snowflake),
+}
+
+/// What a cached [`text::ChannelView`] was built from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ViewKey {
+    pub channel: Snowflake,
+    pub width: u16,
+    pub revision: u64,
+    pub minute: i64,
 }
 
 /// The Ctrl+K popup.
@@ -123,6 +133,8 @@ pub struct App {
     pub memory_kb: Option<u64>,
     pub options_tier: Tier,
     pub switcher: Option<Switcher>,
+    /// The open channel's rendered lines, reused until something changes.
+    pub view_cache: Option<(ViewKey, text::ChannelView)>,
 
     rest: RestClient,
     gateway: GatewayHandle,
@@ -208,7 +220,11 @@ impl App {
     ) -> Self {
         App {
             store: Store::new(options.profile),
-            sidebar: Sidebar::default(),
+            sidebar: {
+                let mut sidebar = Sidebar::default();
+                sidebar.set_show_locked(options.show_locked);
+                sidebar
+            },
             sidebar_state: ListState::default(),
             focus: Focus::Sidebar,
             input: Input::default(),
@@ -225,6 +241,7 @@ impl App {
             memory_kb: resident_memory_kb(),
             options_tier: options.profile.tier,
             switcher: None,
+            view_cache: None,
             rest,
             gateway,
             tasks,
@@ -280,6 +297,8 @@ impl App {
                 self.connection = Connection::Online;
                 self.sidebar.mark_dirty();
                 self.store.apply(event);
+                // READY's JSON was just freed: hand that memory back to the OS.
+                trim_heap();
                 // A new session may have missed messages in the open channel.
                 if let Some(channel_id) = self.store.active_channel()
                     && self.store.needs_history(channel_id)
@@ -509,6 +528,15 @@ impl App {
                 _ => {}
             },
             KeyCode::Char('i' | '/') => self.focus = Focus::Input,
+            KeyCode::Char('L') => {
+                let show = !self.sidebar.shows_locked();
+                self.sidebar.set_show_locked(show);
+                self.show_error(if show {
+                    "Showing channels you can't read"
+                } else {
+                    "Hiding channels you can't read"
+                });
+            }
             _ => {}
         }
     }
@@ -663,6 +691,10 @@ impl App {
         self.loading_older = false;
         let needs_history = self.store.open_channel(channel_id);
         self.sidebar.reveal_channel(&self.store, channel_id);
+        // A locked channel shows a notice; Discord would refuse everything else.
+        if !self.store.can_view(channel_id) {
+            return;
+        }
         self.ack_active(true);
 
         if let Some(guild_id) = self.store.channel(channel_id).and_then(|c| c.guild_id) {
@@ -735,6 +767,10 @@ impl App {
             self.show_error("Open a channel first");
             return;
         };
+        if !self.store.can_view(channel_id) {
+            self.show_error("You don't have permission to send messages here");
+            return;
+        }
         let text = self.input.text().trim().to_owned();
         if let Compose::React(message_id) = self.compose {
             if !text.is_empty() {
@@ -954,7 +990,7 @@ impl App {
             all.push((channel_id, sidebar::channel_label(&self.store, channel_id)));
         }
         for guild in sidebar::sorted_guilds(&self.store) {
-            for entry in sidebar::guild_channels(&self.store, guild) {
+            for entry in sidebar::guild_channels(&self.store, guild, self.sidebar.shows_locked()) {
                 if let Entry::Channel(id) = entry {
                     let label = format!("{} · {}", sidebar::channel_label(&self.store, id), guild.name);
                     all.push((id, label));
@@ -1041,6 +1077,19 @@ fn resident_memory_kb() -> Option<u64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     let line = status.lines().find(|line| line.starts_with("VmRSS:"))?;
     line.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// Returns freed heap memory to the OS. glibc keeps it otherwise, so a
+/// multi-MB READY would stay in the RSS for the whole session.
+fn trim_heap() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: malloc_trim only releases free memory; it has no preconditions.
+    unsafe {
+        unsafe extern "C" {
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        malloc_trim(0);
+    }
 }
 
 /// Asks the terminal for a notification (OSC 9, understood by Windows
@@ -1135,20 +1184,8 @@ mod tests {
         }
     }
 
-    /// An app with one server, a DM, and a few messages, without any network.
-    fn demo_app() -> App {
-        let options = Options {
-            profile: plume_core::Profile::FEATHER,
-            silent_typing: true,
-            notifications: false,
-        };
-        let token = Token::new("test");
-        let (events, _) = mpsc::channel(1);
-        let handle = Gateway::new(token.clone(), events).handle();
-        let (tasks, _) = mpsc::unbounded_channel();
-        let mut app = App::new(RestClient::new(&token).unwrap(), handle, tasks, &options);
-
-        app.on_gateway(Event::Ready {
+    fn demo_app_ready() -> Event {
+        Event::Ready {
             me: user(1, "Me"),
             guilds: vec![Guild {
                 id: Snowflake(10),
@@ -1165,7 +1202,24 @@ mod tests {
             users: vec![user(2, "Alice"), user(3, "Bob")],
             read_states: Vec::new(),
             settings: Vec::new(),
-        });
+        }
+    }
+
+    /// An app with one server, a DM, and a few messages, without any network.
+    fn demo_app() -> App {
+        let options = Options {
+            profile: plume_core::Profile::FEATHER,
+            silent_typing: true,
+            notifications: false,
+            show_locked: false,
+        };
+        let token = Token::new("test");
+        let (events, _) = mpsc::channel(1);
+        let handle = Gateway::new(token.clone(), events).handle();
+        let (tasks, _) = mpsc::unbounded_channel();
+        let mut app = App::new(RestClient::new(&token).unwrap(), handle, tasks, &options);
+
+        app.on_gateway(demo_app_ready());
 
         app.store.open_channel(Snowflake(100));
         app.sidebar.reveal_channel(&app.store, Snowflake(100));
@@ -1411,6 +1465,26 @@ mod tests {
         assert!(!screen.contains("secret-staff"));
         assert!(screen.contains("# general"));
 
+        // L lists locked channels too; opening one shows a notice and loads nothing.
+        app.focus = Focus::Sidebar;
+        press(&mut app, KeyCode::Char('L'));
+        let screen = render(&mut app, 100, 24);
+        assert!(screen.contains("secret-staff") && screen.contains("🔒"));
+        app.open_channel(Snowflake(102));
+        assert!(!app.loading_history);
+        assert!(render(&mut app, 100, 24).contains("permission to read"));
+        press(&mut app, KeyCode::Char('x'));
+        press(&mut app, KeyCode::Enter);
+        assert!(
+            app.error
+                .as_ref()
+                .is_some_and(|(e, _)| e.contains("permission to send"))
+        );
+        app.focus = Focus::Sidebar;
+        press(&mut app, KeyCode::Char('L'));
+        app.open_channel(Snowflake(100));
+        assert!(!render(&mut app, 100, 24).contains("secret-staff"));
+
         app.on_gateway(Event::GuildSettingsUpdate(GuildSettings {
             guild_id: Some(Snowflake(10)),
             muted: false,
@@ -1555,5 +1629,70 @@ mod tests {
             !screen.contains("my own words (edited)"),
             "an embed loading isn't an edit"
         );
+    }
+
+    #[tokio::test]
+    async fn typing_reuses_the_rendered_messages() {
+        let mut app = demo_app();
+        app.focus = Focus::Input;
+        render(&mut app, 100, 24);
+        let before = app.view_cache.as_ref().map(|(key, _)| *key);
+        app.input.insert('x');
+        render(&mut app, 100, 24);
+        assert_eq!(app.view_cache.as_ref().map(|(key, _)| *key), before);
+
+        app.on_gateway(Event::MessageCreate {
+            message: message(500, 3, "new"),
+            author: user(3, "Bob"),
+        });
+        render(&mut app, 100, 24);
+        assert_ne!(
+            app.view_cache.as_ref().map(|(key, _)| *key),
+            before,
+            "new messages rebuild it"
+        );
+    }
+
+    /// `cargo test --release -p plume-tui -- --ignored --nocapture render_speed`
+    #[tokio::test]
+    #[ignore = "a benchmark, run by hand"]
+    async fn render_speed() {
+        let mut app = App::new(
+            RestClient::new(&Token::new("t")).unwrap(),
+            Gateway::new(Token::new("t"), mpsc::channel(1).0).handle(),
+            mpsc::unbounded_channel().0,
+            &Options {
+                profile: plume_core::Profile::FULL,
+                silent_typing: true,
+                notifications: false,
+                show_locked: false,
+            },
+        );
+        app.on_gateway(demo_app_ready());
+        app.store.open_channel(Snowflake(100));
+        let page = (0..500)
+            .map(|i| {
+                (
+                    message(
+                        i,
+                        2 + i % 2,
+                        "**bold** and *italic* with `code`, a <@1> ping and https://example.com/link ||spoiler||",
+                    ),
+                    user(2 + i % 2, "Alice"),
+                )
+            })
+            .collect();
+        app.store.insert_history(Snowflake(100), page);
+        let start = std::time::Instant::now();
+        for _ in 0..100 {
+            app.view_cache = None;
+            render(&mut app, 160, 50);
+        }
+        println!("uncached frame: {:.2} ms", start.elapsed().as_secs_f64() * 10.0);
+        let start = std::time::Instant::now();
+        for _ in 0..100 {
+            render(&mut app, 160, 50);
+        }
+        println!("cached frame:   {:.2} ms", start.elapsed().as_secs_f64() * 10.0);
     }
 }
