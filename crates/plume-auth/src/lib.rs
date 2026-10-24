@@ -2,7 +2,8 @@
 //!
 //! - [`qr_login`]: scan a QR code with the Discord phone app (preferred).
 //! - [`token_from_env`] + [`verify_token`]: use a token the user pasted.
-//! - [`keyring`]: store the token in the OS keyring, never in a file.
+//! - [`keyring`]: store the token in the OS keyring (or, with no keyring, a
+//!   file only you can read).
 
 pub mod keyring;
 mod qr_login;
@@ -35,6 +36,9 @@ pub enum AuthError {
 
     #[error("keyring error: {0}")]
     Keyring(#[from] ::keyring::Error),
+
+    #[error("couldn't use the token file: {0}")]
+    TokenFile(std::io::Error),
 
     #[error("unexpected response from Discord: {0}")]
     Protocol(String),

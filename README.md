@@ -2,11 +2,25 @@
 
 A lightweight, **native** Discord client with selectable weight: 🪶 Feather (5–30 MB), 💬 Standard (50–100 MB), 🧩 Full with voice and plugins (100–250 MB). Same idea as Vesktop — a nicer desktop client — but without Electron or any embedded browser.
 
-**Status:** the 🪶 Feather terminal client (`plume-tui`) works for daily text chat. GTK, voice and the rest are still planned. See the [roadmap](docs/09-roadmap.md).
+**Status:** the 🪶 Feather terminal client (`plume-tui`) works for daily text chat: replies, edits, deletes, reactions, unread state synced with your other devices, and scrollback. GTK, voice and the rest are still planned. See the [roadmap](docs/09-roadmap.md).
 
 > ⚠️ Third-party clients break Discord's Terms of Service. Use at your own risk. See [10-risks.md](docs/10-risks.md).
 
-## Quick start
+## Install
+
+Download the file for your system from the [latest release](../../releases/latest),
+unpack it, and run `plume-tui` in a terminal. The first run walks you through
+logging in: scan the QR code with the Discord app on your phone
+(Settings → Scan QR Code).
+
+- **Windows:** `plume-tui-…-windows-x86_64.zip`. Windows Terminal works best. If SmartScreen warns, choose "More info" → "Run anyway".
+- **macOS:** `…-macos-arm64` for M1 and later, `…-macos-x86_64` for Intel. The build isn't signed, so run `xattr -d com.apple.quarantine plume-tui` once.
+- **Linux:** `…-linux-x86_64`, a static build for any distribution.
+
+Want the newest work in progress? Each CI run in the Actions tab has builds too
+(you need to be signed in to GitHub). See [PROGRESS.md](PROGRESS.md) for what's new.
+
+## Build it yourself
 
 ```bash
 cargo build --release -p plume-tui
@@ -14,7 +28,7 @@ cargo build --release -p plume-tui
 ./target/release/plume-tui
 ```
 
-If QR login says a captcha is required, log in with a token instead (it's checked with Discord, then kept in your system keyring):
+If QR login says a captcha is required, log in with a token instead (it's checked with Discord, then kept in your system keyring, or in a private file if there isn't one):
 
 ```bash
 read -rs DISCORD_TOKEN && export DISCORD_TOKEN
@@ -26,10 +40,13 @@ read -rs DISCORD_TOKEN && export DISCORD_TOKEN
 | Where | Keys |
 |---|---|
 | Anywhere | `Tab` switch sidebar/input · `Ctrl+K` jump to a channel · `PgUp`/`PgDn` scroll · `Ctrl+C` quit |
-| Sidebar | `↑`/`↓` or `j`/`k` move · `Enter`/`→` open or expand · `←` collapse · `i` start typing |
-| Input | `Enter` send · `Esc` back to sidebar · `End` (empty box) jump to newest · `Ctrl+W` delete word · `Ctrl+U` clear |
+| Sidebar | `↑`/`↓` or `j`/`k` move · `Enter`/`→` open or expand · `←` collapse · `L` show/hide locked channels · `i` start typing |
+| Input | `Enter` send · `/upload <file> [message]` send a file · `↑` (empty box) pick a message · `Esc` back to sidebar (or cancel a reply/edit) · `End` (empty box) jump to newest · `Ctrl+W` delete word · `Ctrl+U` clear |
+| Picking a message | `↑`/`↓` move (going past the top loads older messages) · `r` reply · `e` edit yours · `d` delete · `+` react · `1`–`9` toggle that reaction · `o` open its link or attachment · `Esc` back |
 
-Options: `--profile feather|standard|full` (how much to keep in memory), `--silent-typing`. Logs go to `~/.local/state/plume/plume-tui.log`.
+Type `:fire:`-style shortcodes and they're sent as emoji.
+
+Settings: run `plume-tui config` to create a settings file, or use options: `--profile feather|standard|full` (how much to keep in memory), `--silent-typing`, `--no-notifications`, `--show-locked` (also list channels you can't read; toggle with `L` in the sidebar). Logs go to `~/.local/state/plume/plume-tui.log` (`%LOCALAPPDATA%\plume` on Windows).
 
 ## Crates
 

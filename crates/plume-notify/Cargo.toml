@@ -1,0 +1,13 @@
+[package]
+name = "plume-notify"
+version.workspace = true
+edition.workspace = true
+description = "Desktop notifications for Plume"
+
+[dependencies]
+tracing.workspace = true
+
+# Talks to the notification daemon over D-Bus. zbus is already in the
+# build for the keyring, so this adds almost nothing.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+zbus = "5"

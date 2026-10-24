@@ -346,10 +346,7 @@ mod tests {
             parse("*a **b** c*"),
             [Node::Italic(vec![text("a "), Node::Bold(vec![text("b")]), text(" c")])]
         );
-        assert_eq!(
-            parse("||**x**||"),
-            [Node::Spoiler(vec![Node::Bold(vec![text("x")])])]
-        );
+        assert_eq!(parse("||**x**||"), [Node::Spoiler(vec![Node::Bold(vec![text("x")])])]);
     }
 
     #[test]
@@ -363,7 +360,10 @@ mod tests {
     #[test]
     fn snake_case_is_not_italic() {
         assert_eq!(parse("my_var_name"), [text("my_var_name")]);
-        assert_eq!(parse("use _this_ one"), [text("use "), Node::Italic(vec![text("this")]), text(" one")]);
+        assert_eq!(
+            parse("use _this_ one"),
+            [text("use "), Node::Italic(vec![text("this")]), text(" one")]
+        );
     }
 
     #[test]
@@ -376,7 +376,10 @@ mod tests {
     fn inline_code_is_not_parsed_inside() {
         assert_eq!(parse("`**x**`"), [Node::InlineCode("**x**".into())]);
         assert_eq!(parse("``a`b``"), [Node::InlineCode("a`b".into())]);
-        assert_eq!(parse("say `hi` now"), [text("say "), Node::InlineCode("hi".into()), text(" now")]);
+        assert_eq!(
+            parse("say `hi` now"),
+            [text("say "), Node::InlineCode("hi".into()), text(" now")]
+        );
     }
 
     #[test]
@@ -399,7 +402,13 @@ mod tests {
                 text("after"),
             ]
         );
-        assert_eq!(parse("```one line```"), [Node::CodeBlock { language: None, code: "one line".into() }]);
+        assert_eq!(
+            parse("```one line```"),
+            [Node::CodeBlock {
+                language: None,
+                code: "one line".into()
+            }]
+        );
     }
 
     #[test]
@@ -416,7 +425,13 @@ mod tests {
                 Node::Quote(vec![text("all"), Node::LineBreak, text("of this")])
             ]
         );
-        assert_eq!(parse("## Title"), [Node::Heading { level: 2, children: vec![text("Title")] }]);
+        assert_eq!(
+            parse("## Title"),
+            [Node::Heading {
+                level: 2,
+                children: vec![text("Title")]
+            }]
+        );
         assert_eq!(parse("-# small"), [Node::Subtext(vec![text("small")])]);
         assert_eq!(parse("#hashtag"), [text("#hashtag")]);
     }
@@ -438,9 +453,19 @@ mod tests {
         );
         assert_eq!(
             parse("<a:party:99>"),
-            [Node::CustomEmoji { name: "party".into(), id: Snowflake(99), animated: true }]
+            [Node::CustomEmoji {
+                name: "party".into(),
+                id: Snowflake(99),
+                animated: true
+            }]
         );
-        assert_eq!(parse("<t:1700000000:R>"), [Node::Timestamp { unix: 1_700_000_000, style: Some('R') }]);
+        assert_eq!(
+            parse("<t:1700000000:R>"),
+            [Node::Timestamp {
+                unix: 1_700_000_000,
+                style: Some('R')
+            }]
+        );
         assert_eq!(parse("@everyone look"), [Node::Everyone, text(" look")]);
         assert_eq!(parse("a < b > c"), [text("a < b > c")]);
         assert_eq!(parse("<@notanid>"), [text("<@notanid>")]);
@@ -454,17 +479,27 @@ mod tests {
         );
         assert_eq!(
             parse("https://en.wikipedia.org/wiki/Rust_(programming_language)"),
-            [Node::Link("https://en.wikipedia.org/wiki/Rust_(programming_language)".into())]
+            [Node::Link(
+                "https://en.wikipedia.org/wiki/Rust_(programming_language)".into()
+            )]
         );
-        assert_eq!(parse("<https://quiet.example>"), [Node::Link("https://quiet.example".into())]);
+        assert_eq!(
+            parse("<https://quiet.example>"),
+            [Node::Link("https://quiet.example".into())]
+        );
         assert_eq!(parse("nothttps://x.y"), [text("nothttps://x.y")]);
     }
 
     #[test]
     fn non_ascii_text_is_safe() {
-        assert_eq!(parse("héllo **wörld** 🎉"), [text("héllo "), Node::Bold(vec![text("wörld")]), text(" 🎉")]);
+        assert_eq!(
+            parse("héllo **wörld** 🎉"),
+            [text("héllo "), Node::Bold(vec![text("wörld")]), text(" 🎉")]
+        );
         // Odd input must never panic.
-        for input in ["*", "**", "`", "```", "<", "<@", "||", "\\", "_", "~~~", "*🎉*", "_é_", "> ", ">>> "] {
+        for input in [
+            "*", "**", "`", "```", "<", "<@", "||", "\\", "_", "~~~", "*🎉*", "_é_", "> ", ">>> ",
+        ] {
             let _ = parse(input);
         }
     }
@@ -472,7 +507,9 @@ mod tests {
     #[test]
     fn never_panics_on_any_short_input() {
         // Every string up to 4 characters from the trickiest alphabet.
-        let alphabet = ['*', '_', '`', '|', '~', '<', '>', '@', '\\', 'a', 'é', '\n', '#', ' ', '-', 'h'];
+        let alphabet = [
+            '*', '_', '`', '|', '~', '<', '>', '@', '\\', 'a', 'é', '\n', '#', ' ', '-', 'h',
+        ];
         let mut inputs = vec![String::new()];
         for _ in 0..4 {
             let longer: Vec<String> = inputs

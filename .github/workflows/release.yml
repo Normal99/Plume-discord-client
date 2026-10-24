@@ -1,0 +1,107 @@
+name: Release
+
+# Push a tag like `v0.2.0` to publish a release with downloads for every
+# platform. Anyone can download them, no GitHub account needed.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  test:
+    name: tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --locked
+
+  build:
+    name: build (${{ matrix.name }})
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Static (musl), so it runs on any Linux distribution.
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - name: macos-arm64
+            os: macos-latest
+            target: aarch64-apple-darwin
+          - name: macos-x86_64
+            os: macos-latest
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      - if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --locked -p plume-tui --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        run: |
+          name="plume-tui-${GITHUB_REF_NAME}-${{ matrix.name }}"
+          mkdir -p "dist/$name"
+          exe=plume-tui
+          [[ "${{ matrix.os }}" == windows-* ]] && exe=plume-tui.exe
+          cp "target/${{ matrix.target }}/release/$exe" README.md LICENSE "dist/$name/"
+          cd dist
+          if [[ "${{ matrix.os }}" == windows-* ]]; then
+            7z a -tzip "$name.zip" "$name" > /dev/null
+          else
+            tar czf "$name.tar.gz" "$name"
+          fi
+          rm -r "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.name }}
+          path: dist/*
+
+  publish:
+    name: publish
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            ## Download
+
+            | System | File |
+            |---|---|
+            | Windows | `…-windows-x86_64.zip` |
+            | macOS (Apple Silicon, M1 and later) | `…-macos-arm64.tar.gz` |
+            | macOS (Intel) | `…-macos-x86_64.tar.gz` |
+            | Linux (any distribution) | `…-linux-x86_64.tar.gz` |
+
+            Unpack it, open a terminal in that folder, run `plume-tui login` and scan the QR code with the Discord app on your phone (Settings → Scan QR Code). Then run `plume-tui`.
+
+            On macOS, the first time: run `xattr -d com.apple.quarantine plume-tui` (the build isn't signed by Apple). On Windows, SmartScreen may warn; choose "More info" → "Run anyway".
+
+            What's new is in [PROGRESS.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/PROGRESS.md).

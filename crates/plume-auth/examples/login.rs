@@ -46,8 +46,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Check the token works before saving it.
     let username = verify_token(&token).await.map_err(|e| e.to_string())?;
-    tokio::task::spawn_blocking(move || keyring::save_token(&token)).await??;
-    println!("Logged in as {username}! The token is saved in your system keyring.");
+    let storage = tokio::task::spawn_blocking(move || keyring::save_token(&token)).await??;
+    println!("Logged in as {username}! Token saved: {storage:?}");
     println!("Next: cargo run -p plume-gateway --example tail");
     Ok(())
 }

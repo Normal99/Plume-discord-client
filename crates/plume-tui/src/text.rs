@@ -18,9 +18,16 @@ const GROUP_WINDOW_MS: u64 = 7 * 60 * 1000;
 const DIM: Style = Style::new().fg(Color::DarkGray);
 const CODE: Style = Style::new().fg(Color::Yellow);
 const MENTION: Style = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD);
-const MENTION_ME: Style = Style::new().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD);
+const MENTION_ME: Style = Style::new()
+    .fg(Color::Black)
+    .bg(Color::Yellow)
+    .add_modifier(Modifier::BOLD);
 const LINK: Style = Style::new().fg(Color::Blue).add_modifier(Modifier::UNDERLINED);
 const EMOJI: Style = Style::new().fg(Color::Magenta);
+const EMBED_BAR: Style = Style::new().fg(Color::Rgb(88, 101, 242));
+const SELECTED: Style = Style::new().bg(Color::Rgb(45, 48, 70));
+const REACTION: Style = Style::new().fg(Color::Gray).bg(Color::Rgb(40, 40, 48));
+const REACTION_MINE: Style = Style::new().fg(Color::White).bg(Color::Rgb(70, 78, 160));
 
 /// Colours for usernames, picked by user ID so each person keeps theirs.
 const NAME_COLORS: [Color; 6] = [
@@ -32,11 +39,37 @@ const NAME_COLORS: [Color; 6] = [
     Color::LightCyan,
 ];
 
+/// A channel's messages as terminal lines. Building it parses every
+/// message's markdown, so the renderer caches it until the store changes.
+pub struct ChannelView {
+    pub lines: Vec<Line<'static>>,
+    /// Which lines belong to each message: `(id, start, end)`, oldest first.
+    pub ranges: Vec<(Snowflake, usize, usize)>,
+}
+
+impl ChannelView {
+    /// The lines (`start..end`) of one message.
+    pub fn range_of(&self, id: Snowflake) -> Option<(usize, usize)> {
+        let index = self.ranges.binary_search_by_key(&id, |r| r.0).ok()?;
+        let (_, start, end) = self.ranges[index];
+        Some((start, end))
+    }
+}
+
 /// Every line for a channel's cached messages, oldest first.
-pub fn channel_lines(store: &Store, channel_id: Snowflake, width: u16) -> Vec<Line<'static>> {
+pub fn channel_lines(store: &Store, channel_id: Snowflake, width: u16) -> ChannelView {
     let width = usize::from(width).max(INDENT + 10);
     let mut lines = Vec::new();
+    let mut ranges = Vec::with_capacity(store.messages(channel_id).len());
     let mut previous: Option<&Message> = None;
+
+    if !store.can_view(channel_id) {
+        lines.push(Line::styled(
+            "🔒 You don't have permission to read this channel.",
+            Style::new().add_modifier(Modifier::DIM),
+        ));
+        return ChannelView { lines, ranges };
+    }
 
     for message in store.messages(channel_id) {
         let time = local_time(message.timestamp_ms());
@@ -44,6 +77,7 @@ pub fn channel_lines(store: &Store, channel_id: Snowflake, width: u16) -> Vec<Li
         if new_day {
             lines.push(day_separator(&time, width));
         }
+        let start = lines.len();
 
         if let Some(reply_to) = message.reply_to {
             lines.push(reply_line(store, message.channel_id, reply_to, width));
@@ -61,9 +95,36 @@ pub fn channel_lines(store: &Store, channel_id: Snowflake, width: u16) -> Vec<Li
         for logical in content_lines(store, message) {
             lines.extend(wrap(&logical, width, INDENT));
         }
+        if !message.reactions.is_empty() {
+            lines.extend(wrap(&reaction_segments(message), width, INDENT));
+        }
+
+        ranges.push((message.id, start, lines.len()));
         previous = Some(message);
     }
-    lines
+    ChannelView { lines, ranges }
+}
+
+/// Highlights a line of the selected message.
+pub fn highlight(line: Line<'static>) -> Line<'static> {
+    line.patch_style(SELECTED)
+}
+
+/// "👍 3  :blob: 1", with your own reactions highlighted.
+fn reaction_segments(message: &Message) -> Vec<Segment> {
+    let mut segments = Vec::with_capacity(message.reactions.len() * 2);
+    for (index, reaction) in message.reactions.iter().enumerate() {
+        if index > 0 {
+            segments.push((" ".to_owned(), Style::new()));
+        }
+        let label = match reaction.emoji.id {
+            Some(_) => format!(":{}:", reaction.emoji.name),
+            None => reaction.emoji.name.clone(),
+        };
+        let style = if reaction.me { REACTION_MINE } else { REACTION };
+        segments.push((format!(" {label} {} ", reaction.count), style));
+    }
+    segments
 }
 
 fn header_line(store: &Store, message: &Message, time: &DateTime<Local>) -> Line<'static> {
@@ -91,7 +152,10 @@ fn reply_line(store: &Store, channel_id: Snowflake, reply_to: Snowflake, width: 
 fn day_separator(time: &DateTime<Local>, width: usize) -> Line<'static> {
     let label = format!(" {} ", time.format("%a %-d %b %Y"));
     let side = width.saturating_sub(label.width()) / 2;
-    Line::from(Span::styled(format!("{}{label}{}", "─".repeat(side), "─".repeat(side)), DIM))
+    Line::from(Span::styled(
+        format!("{}{label}{}", "─".repeat(side), "─".repeat(side)),
+        DIM,
+    ))
 }
 
 /// The message body as logical lines: markdown, then attachments, then "(edited)".
@@ -144,9 +208,33 @@ fn content_lines(store: &Store, message: &Message) -> Vec<Vec<Segment>> {
         lines.push(current);
     }
 
+    for embed in &message.embeds {
+        let mut first = vec![("▏ ".to_owned(), EMBED_BAR)];
+        match (&embed.title, &embed.url) {
+            (Some(title), Some(url)) => {
+                first.push((title.clone(), Style::new().add_modifier(Modifier::BOLD)));
+                first.push(("  ".to_owned(), Style::new()));
+                first.push((url.clone(), LINK));
+            }
+            (Some(title), None) => first.push((title.clone(), Style::new().add_modifier(Modifier::BOLD))),
+            (None, Some(url)) => first.push((url.clone(), LINK)),
+            (None, None) => {}
+        }
+        if first.len() > 1 {
+            lines.push(first);
+        }
+        if let Some(description) = &embed.description {
+            for text in description.lines().filter(|l| !l.trim().is_empty()).take(4) {
+                lines.push(vec![("▏ ".to_owned(), EMBED_BAR), (text.to_owned(), DIM)]);
+            }
+        }
+    }
     for attachment in &message.attachments {
         lines.push(vec![
-            (format!("📎 {} ({}) ", attachment.filename, human_size(attachment.size)), DIM),
+            (
+                format!("📎 {} ({}) ", attachment.filename, human_size(attachment.size)),
+                DIM,
+            ),
             (attachment.url.clone(), LINK),
         ]);
     }
@@ -357,5 +445,33 @@ mod tests {
     fn truncates_with_ellipsis() {
         assert_eq!(truncate("hello world", 6), "hello…");
         assert_eq!(truncate("hi", 6), "hi");
+    }
+
+    #[test]
+    fn reactions_render_with_counts() {
+        use plume_core::models::{Emoji, Reaction};
+        let message = Message {
+            reactions: vec![
+                Reaction {
+                    emoji: Emoji {
+                        name: "👍".into(),
+                        id: None,
+                    },
+                    count: 3,
+                    me: true,
+                },
+                Reaction {
+                    emoji: Emoji {
+                        name: "blob".into(),
+                        id: Some(Snowflake(1)),
+                    },
+                    count: 1,
+                    me: false,
+                },
+            ],
+            ..Message::default()
+        };
+        let text: String = reaction_segments(&message).into_iter().map(|(t, _)| t).collect();
+        assert_eq!(text, " 👍 3   :blob: 1 ");
     }
 }

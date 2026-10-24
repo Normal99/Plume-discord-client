@@ -23,6 +23,8 @@ pub struct Sidebar {
     selected: usize,
     expanded: HashSet<Snowflake>,
     dms_collapsed: bool,
+    /// List channels we can't read too (with a lock), like Discord's "show all channels".
+    show_locked: bool,
     dirty: bool,
     /// Entry to select after the next rebuild (it may not exist yet).
     pending_select: Option<Entry>,
@@ -38,6 +40,7 @@ impl Default for Sidebar {
             selected: 0,
             expanded: HashSet::new(),
             dms_collapsed: false,
+            show_locked: false,
             dirty: true,
             pending_select: None,
         }
@@ -63,6 +66,15 @@ impl Sidebar {
 
     pub fn dms_collapsed(&self) -> bool {
         self.dms_collapsed
+    }
+
+    pub fn shows_locked(&self) -> bool {
+        self.show_locked
+    }
+
+    pub fn set_show_locked(&mut self, show: bool) {
+        self.show_locked = show;
+        self.dirty = true;
     }
 
     pub fn mark_dirty(&mut self) {
@@ -132,13 +144,14 @@ impl Sidebar {
         self.entries.clear();
         self.entries.push(Entry::DmHeader);
         if !self.dms_collapsed {
-            self.entries.extend(sorted_dms(store).into_iter().take(MAX_DMS).map(Entry::Dm));
+            self.entries
+                .extend(sorted_dms(store).into_iter().take(MAX_DMS).map(Entry::Dm));
         }
         self.entries.push(Entry::ServerHeader);
         for guild in sorted_guilds(store) {
             self.entries.push(Entry::Guild(guild.id));
             if self.expanded.contains(&guild.id) {
-                self.entries.extend(guild_channels(store, guild));
+                self.entries.extend(guild_channels(store, guild, self.show_locked));
             }
         }
 
@@ -167,15 +180,39 @@ pub fn sorted_guilds(store: &Store) -> Vec<&Guild> {
 }
 
 /// A server's text channels in Discord's order: uncategorised ones first,
-/// then each category followed by its channels. Empty categories are skipped.
-pub fn guild_channels(store: &Store, guild: &Guild) -> Vec<Entry> {
-    let channels: Vec<&Channel> = guild.channels.iter().filter_map(|&id| store.channel(id)).collect();
+/// then each category followed by its channels, each channel followed by
+/// its active threads (busiest first). Empty categories are skipped.
+/// Channels we can't read are left out unless `show_locked` is set.
+pub fn guild_channels(store: &Store, guild: &Guild, show_locked: bool) -> Vec<Entry> {
+    let channels: Vec<&Channel> = guild
+        .channels
+        .iter()
+        .filter_map(|&id| store.channel(id))
+        .filter(|c| show_locked || c.kind == ChannelKind::Category || store.can_view(c.id))
+        .collect();
     let order = |c: &&Channel| (c.position, c.id);
+    // Forums hold their posts as threads, so they're listed like channels.
+    let listed = |c: &Channel| (c.kind.is_text() || c.kind == ChannelKind::Forum) && c.kind != ChannelKind::Thread;
+    let threads_of = |parent: Snowflake| {
+        let mut threads: Vec<&Channel> = channels
+            .iter()
+            .copied()
+            .filter(|c| c.kind == ChannelKind::Thread && c.parent_id == Some(parent))
+            .collect();
+        threads.sort_by_key(|c| std::cmp::Reverse(c.last_message_id.unwrap_or(c.id)));
+        threads.into_iter().map(|c| Entry::Channel(c.id))
+    };
+    let with_threads = |list: Vec<&Channel>, entries: &mut Vec<Entry>| {
+        for channel in list {
+            entries.push(Entry::Channel(channel.id));
+            entries.extend(threads_of(channel.id));
+        }
+    };
 
     let mut top: Vec<&Channel> = channels
         .iter()
         .copied()
-        .filter(|c| c.kind == ChannelKind::Text && c.parent_id.is_none())
+        .filter(|c| listed(c) && c.parent_id.is_none())
         .collect();
     top.sort_by_key(order);
 
@@ -186,19 +223,20 @@ pub fn guild_channels(store: &Store, guild: &Guild) -> Vec<Entry> {
         .collect();
     categories.sort_by_key(order);
 
-    let mut entries: Vec<Entry> = top.iter().map(|c| Entry::Channel(c.id)).collect();
+    let mut entries = Vec::new();
+    with_threads(top, &mut entries);
     for category in categories {
         let mut children: Vec<&Channel> = channels
             .iter()
             .copied()
-            .filter(|c| c.kind == ChannelKind::Text && c.parent_id == Some(category.id))
+            .filter(|c| listed(c) && c.parent_id == Some(category.id))
             .collect();
         if children.is_empty() {
             continue;
         }
         children.sort_by_key(order);
         entries.push(Entry::Category(category.id));
-        entries.extend(children.iter().map(|c| Entry::Channel(c.id)));
+        with_threads(children, &mut entries);
     }
     entries
 }

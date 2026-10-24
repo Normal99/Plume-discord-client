@@ -18,7 +18,7 @@
 2. **Paste token.** Advanced fallback.
 3. Email/password login is **out of scope**. It needs captcha and MFA flows and is the riskiest path.
 
-The token lives only in the OS keyring. It is never written to config files or logs (redact the `Authorization` header in tracing).
+The token lives in the OS keyring. On systems without one (servers, minimal installs, WSL) it falls back to `~/.config/plume/token` with mode 0600, and `logout` removes both. It is never written to config files or logs (the `Token` type redacts itself in `Debug`).
 
 ## Client identity
 Send super-properties and headers consistent with a desktop client and keep them in one place (`plume-rest/src/client.rs`) so they're easy to update when Discord changes them.

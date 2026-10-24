@@ -6,7 +6,7 @@ use qrcode::render::unicode::Dense1x2;
 
 pub async fn logout() -> Result<(), Box<dyn std::error::Error>> {
     tokio::task::spawn_blocking(keyring::delete_token).await??;
-    println!("Logged out: removed the saved token from the keyring.");
+    println!("Logged out: removed the saved token.");
     Ok(())
 }
 
@@ -25,17 +25,30 @@ pub async fn login(use_token: bool) -> Result<(), Box<dyn std::error::Error>> {
         match result {
             Ok(token) => token,
             Err(AuthError::CaptchaRequired) => {
-                return Err("Discord wants a captcha for QR logins right now, and Plume doesn't solve \
+                return Err(
+                    "Discord wants a captcha for QR logins right now, and Plume doesn't solve \
                      those. Use `plume-tui login --token` instead (see the README)."
-                    .into());
+                        .into(),
+                );
             }
             Err(error) => return Err(error.into()),
         }
     };
 
     let username = verify_token(&token).await.map_err(|e| e.to_string())?;
-    tokio::task::spawn_blocking(move || keyring::save_token(&token)).await??;
-    println!("Logged in as {username}! Start the client with: plume-tui");
+    let storage = tokio::task::spawn_blocking(move || keyring::save_token(&token)).await??;
+    match storage {
+        keyring::Storage::Keyring => println!("Logged in as {username}! The token is in your system keyring."),
+        keyring::Storage::File(path) => {
+            println!("Logged in as {username}!");
+            println!(
+                "No system keyring was available, so the token is saved in {}",
+                path.display()
+            );
+            println!("(readable only by you). `plume-tui logout` deletes it.");
+        }
+    }
+    println!("Start the client with: plume-tui");
     Ok(())
 }
 
