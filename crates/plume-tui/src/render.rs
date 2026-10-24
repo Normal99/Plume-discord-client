@@ -5,12 +5,13 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, Paragraph};
 
-use crate::app::{App, Connection, Focus};
+use crate::app::{App, Compose, Connection, Focus};
 use crate::layout::{self, Areas};
 use crate::sidebar::{self, Entry};
 use crate::text;
 
 const DIM: Style = Style::new().fg(Color::DarkGray);
+const WARNING: Style = Style::new().fg(Color::White).bg(Color::Red);
 const ACCENT: Color = Color::Rgb(88, 101, 242); // Discord blurple
 const SELECTED: Style = Style::new().bg(Color::Rgb(50, 55, 80));
 const UNREAD: Style = Style::new().fg(Color::White).add_modifier(Modifier::BOLD);
@@ -28,6 +29,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     if areas.messages.width > 0 {
         draw_chat(frame, app, &areas);
+    } else {
+        app.at_top = false;
     }
     draw_status(frame, app, areas.status);
     if app.switcher.is_some() {
@@ -82,7 +85,8 @@ fn sidebar_row(
         Entry::Guild(id) => {
             let arrow = if app.sidebar.is_expanded(id) { "▾" } else { "▸" };
             let name = store.guild(id).map_or("?", |g| g.name.as_str());
-            (format!("{arrow} {name}"), store.guild_unread(id), Style::new())
+            let base = if store.is_guild_muted(id) { DIM } else { Style::new() };
+            (format!("{arrow} {name}"), store.guild_unread(id), base)
         }
         Entry::Category(id) => {
             let name = store.channel(id).and_then(|c| c.name.as_deref()).unwrap_or("");
@@ -90,7 +94,12 @@ fn sidebar_row(
         }
         Entry::Channel(id) => {
             let name = store.channel(id).and_then(|c| c.name.as_deref()).unwrap_or("?");
-            (format!("    # {name}"), store.unread(id), Style::new().fg(Color::Gray))
+            let base = if store.is_muted(id) {
+                DIM
+            } else {
+                Style::new().fg(Color::Gray)
+            };
+            (format!("    # {name}"), store.unread(id), base)
         }
     };
 
@@ -116,18 +125,19 @@ fn sidebar_row(
     Line::from(spans)
 }
 
-fn draw_chat(frame: &mut Frame, app: &App, areas: &Areas) {
-    let store = &app.store;
-    let Some(channel_id) = store.active_channel() else {
+fn draw_chat(frame: &mut Frame, app: &mut App, areas: &Areas) {
+    let Some(channel_id) = app.store.active_channel() else {
         let hint = Paragraph::new(vec![
             Line::raw(""),
             Line::styled("  Pick a channel on the left (↑/↓ and Enter),", DIM),
             Line::styled("  or press Ctrl+K to jump to one by name.", DIM),
         ]);
         frame.render_widget(hint, areas.messages);
+        app.at_top = false;
         draw_input(frame, app, areas.input);
         return;
     };
+    let store = &app.store;
 
     // Title: "#general · Server" or "@Alice".
     let mut title = vec![Span::styled(
@@ -141,16 +151,34 @@ fn draw_chat(frame: &mut Frame, app: &App, areas: &Areas) {
     {
         title.push(Span::styled(format!(" · {}", guild.name), DIM));
     }
-    if app.loading_history {
+    if app.loading_history || app.loading_older {
         title.push(Span::styled("  loading…", DIM));
     }
     frame.render_widget(Paragraph::new(Line::from(title)), areas.title);
 
     // Messages, anchored to the bottom and scrolled up by `app.scroll` lines.
-    let lines = text::channel_lines(store, channel_id, areas.messages.width);
+    let selected = if app.focus == Focus::Messages {
+        app.selected
+    } else {
+        None
+    };
+    let view = text::channel_lines(store, channel_id, areas.messages.width, selected);
+    let lines = view.lines;
     let height = usize::from(areas.messages.height);
     let max_scroll = lines.len().saturating_sub(height);
-    let scroll = app.scroll.min(max_scroll);
+    // Keep the selected message on screen (its start, if it's taller than the screen).
+    if let Some((start, end)) = view.selected {
+        let bottom = lines.len() - app.scroll.min(lines.len());
+        if end > bottom {
+            app.scroll = lines.len() - end;
+        }
+        if start < bottom.saturating_sub(height) || end - start > height {
+            app.scroll = (lines.len() - start).saturating_sub(height);
+        }
+    }
+    app.scroll = app.scroll.min(max_scroll);
+    let scroll = app.scroll;
+    app.at_top = scroll >= max_scroll;
     let end = lines.len() - scroll;
     let start = end.saturating_sub(height);
     let visible: Vec<Line> = lines[start..end].to_vec();
@@ -163,24 +191,48 @@ fn draw_chat(frame: &mut Frame, app: &App, areas: &Areas) {
     };
     frame.render_widget(Paragraph::new(visible), area);
 
-    if scroll > 0 {
-        let note = Paragraph::new(Line::styled(
-            " ↓ newer messages below (End) ",
+    // One row under the messages: the most important of these.
+    let notice = if let Some(message_id) = app.confirm_delete {
+        Some((
+            format!(
+                " Delete {}'s message? y = delete, any other key = keep ",
+                app.author_name(message_id)
+            ),
+            WARNING,
+        ))
+    } else if let Some(banner) = compose_banner(app) {
+        Some((banner, Style::new().fg(Color::Black).bg(Color::Cyan)))
+    } else if scroll > 0 && app.focus != Focus::Messages {
+        Some((
+            " ↓ newer messages below (End) ".to_owned(),
             Style::new().fg(Color::Black).bg(Color::Yellow),
         ))
-        .right_aligned();
-        frame.render_widget(
-            note,
-            Rect {
-                height: 1,
-                ..areas.typing
-            },
-        );
-    } else if let Some(typing) = app.typing_text() {
-        frame.render_widget(Paragraph::new(Line::styled(format!(" {typing}"), DIM)), areas.typing);
+    } else {
+        None
+    };
+    match notice {
+        Some((text, style)) => frame.render_widget(Paragraph::new(Line::styled(text, style)), areas.typing),
+        None => {
+            if let Some(typing) = app.typing_text() {
+                frame.render_widget(Paragraph::new(Line::styled(format!(" {typing}"), DIM)), areas.typing);
+            }
+        }
     }
 
     draw_input(frame, app, areas.input);
+}
+
+/// "Replying to Alice", "Editing your message"… while composing something special.
+fn compose_banner(app: &App) -> Option<String> {
+    match app.compose {
+        Compose::Message => None,
+        Compose::Reply(id) => Some(format!(" ↪ Replying to {} · Esc to cancel ", app.author_name(id))),
+        Compose::Edit(_) => Some(" ✎ Editing your message · Enter to save, Esc to cancel ".to_owned()),
+        Compose::React(id) => Some(format!(
+            " ☺ React to {}'s message · Enter to add or remove ",
+            app.author_name(id)
+        )),
+    }
 }
 
 fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
@@ -196,9 +248,10 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
     let offset = cursor.saturating_sub(width.saturating_sub(1));
 
     let content = if app.input.is_empty() {
-        let placeholder = match app.store.active_channel() {
-            Some(id) => format!("Message {}", sidebar::channel_label(&app.store, id)),
-            None => "Open a channel to start chatting".to_owned(),
+        let placeholder = match (app.compose, app.store.active_channel()) {
+            (Compose::React(_), _) => "Type an emoji, like 👍 or :fire:".to_owned(),
+            (_, Some(id)) => format!("Message {}", sidebar::channel_label(&app.store, id)),
+            (_, None) => "Open a channel to start chatting".to_owned(),
         };
         Line::styled(placeholder, DIM)
     } else {
@@ -216,6 +269,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     let (state, color) = match app.connection {
         Connection::Connecting => ("connecting…", Color::Yellow),
         Connection::Online => ("online", Color::Green),
+        Connection::Reconnecting => ("reconnecting…", Color::Yellow),
     };
     let mut left = vec![Span::styled(" ● ", Style::new().fg(color)), Span::raw(state)];
     if let Some(me) = app.store.me() {
@@ -227,7 +281,10 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         None => Span::styled(
             match app.focus {
                 Focus::Sidebar => "  ↑↓ move · Enter open · Tab type · Ctrl+K jump · Ctrl+C quit",
-                Focus::Input => "  Enter send · Esc sidebar · PgUp/PgDn scroll · Ctrl+K jump",
+                Focus::Input => "  Enter send · ↑ pick a message · Esc sidebar · PgUp/PgDn scroll · Ctrl+K jump",
+                Focus::Messages => {
+                    "  r reply · e edit · d delete · + react · 1-9 toggle reaction · o open link · Esc back"
+                }
             },
             DIM,
         ),

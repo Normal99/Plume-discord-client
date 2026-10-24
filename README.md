@@ -2,7 +2,7 @@
 
 A lightweight, **native** Discord client with selectable weight: 🪶 Feather (5–30 MB), 💬 Standard (50–100 MB), 🧩 Full with voice and plugins (100–250 MB). Same idea as Vesktop — a nicer desktop client — but without Electron or any embedded browser.
 
-**Status:** the 🪶 Feather terminal client (`plume-tui`) works for daily text chat. GTK, voice and the rest are still planned. See the [roadmap](docs/09-roadmap.md).
+**Status:** the 🪶 Feather terminal client (`plume-tui`) works for daily text chat: replies, edits, deletes, reactions, unread state synced with your other devices, and scrollback. GTK, voice and the rest are still planned. See the [roadmap](docs/09-roadmap.md).
 
 > ⚠️ Third-party clients break Discord's Terms of Service. Use at your own risk. See [10-risks.md](docs/10-risks.md).
 
@@ -33,7 +33,10 @@ read -rs DISCORD_TOKEN && export DISCORD_TOKEN
 |---|---|
 | Anywhere | `Tab` switch sidebar/input · `Ctrl+K` jump to a channel · `PgUp`/`PgDn` scroll · `Ctrl+C` quit |
 | Sidebar | `↑`/`↓` or `j`/`k` move · `Enter`/`→` open or expand · `←` collapse · `i` start typing |
-| Input | `Enter` send · `Esc` back to sidebar · `End` (empty box) jump to newest · `Ctrl+W` delete word · `Ctrl+U` clear |
+| Input | `Enter` send · `↑` (empty box) pick a message · `Esc` back to sidebar (or cancel a reply/edit) · `End` (empty box) jump to newest · `Ctrl+W` delete word · `Ctrl+U` clear |
+| Picking a message | `↑`/`↓` move (going past the top loads older messages) · `r` reply · `e` edit yours · `d` delete · `+` react · `1`–`9` toggle that reaction · `o` open its link or attachment · `Esc` back |
+
+Type `:fire:`-style shortcodes and they're sent as emoji.
 
 Options: `--profile feather|standard|full` (how much to keep in memory), `--silent-typing`. Logs go to `~/.local/state/plume/plume-tui.log` (`%LOCALAPPDATA%\plume` on Windows).
 

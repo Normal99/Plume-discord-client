@@ -32,6 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 guilds,
                 channels,
                 users,
+                ..
             } => println!(
                 "READY as {}: {} servers, {} channels, {} users",
                 me.display_name(),

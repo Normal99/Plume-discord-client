@@ -24,6 +24,9 @@ const MENTION_ME: Style = Style::new()
     .add_modifier(Modifier::BOLD);
 const LINK: Style = Style::new().fg(Color::Blue).add_modifier(Modifier::UNDERLINED);
 const EMOJI: Style = Style::new().fg(Color::Magenta);
+const SELECTED: Style = Style::new().bg(Color::Rgb(45, 48, 70));
+const REACTION: Style = Style::new().fg(Color::Gray).bg(Color::Rgb(40, 40, 48));
+const REACTION_MINE: Style = Style::new().fg(Color::White).bg(Color::Rgb(70, 78, 160));
 
 /// Colours for usernames, picked by user ID so each person keeps theirs.
 const NAME_COLORS: [Color; 6] = [
@@ -35,10 +38,19 @@ const NAME_COLORS: [Color; 6] = [
     Color::LightCyan,
 ];
 
-/// Every line for a channel's cached messages, oldest first.
-pub fn channel_lines(store: &Store, channel_id: Snowflake, width: u16) -> Vec<Line<'static>> {
+/// A channel's messages as terminal lines.
+pub struct ChannelView {
+    pub lines: Vec<Line<'static>>,
+    /// Which lines belong to the selected message: `start..end`.
+    pub selected: Option<(usize, usize)>,
+}
+
+/// Every line for a channel's cached messages, oldest first, with the
+/// `selected` message highlighted.
+pub fn channel_lines(store: &Store, channel_id: Snowflake, width: u16, selected: Option<Snowflake>) -> ChannelView {
     let width = usize::from(width).max(INDENT + 10);
     let mut lines = Vec::new();
+    let mut selected_range = None;
     let mut previous: Option<&Message> = None;
 
     for message in store.messages(channel_id) {
@@ -47,6 +59,7 @@ pub fn channel_lines(store: &Store, channel_id: Snowflake, width: u16) -> Vec<Li
         if new_day {
             lines.push(day_separator(&time, width));
         }
+        let start = lines.len();
 
         if let Some(reply_to) = message.reply_to {
             lines.push(reply_line(store, message.channel_id, reply_to, width));
@@ -64,9 +77,39 @@ pub fn channel_lines(store: &Store, channel_id: Snowflake, width: u16) -> Vec<Li
         for logical in content_lines(store, message) {
             lines.extend(wrap(&logical, width, INDENT));
         }
+        if !message.reactions.is_empty() {
+            lines.extend(wrap(&reaction_segments(message), width, INDENT));
+        }
+
+        if Some(message.id) == selected {
+            for line in &mut lines[start..] {
+                *line = std::mem::take(line).patch_style(SELECTED);
+            }
+            selected_range = Some((start, lines.len()));
+        }
         previous = Some(message);
     }
-    lines
+    ChannelView {
+        lines,
+        selected: selected_range,
+    }
+}
+
+/// "👍 3  :blob: 1", with your own reactions highlighted.
+fn reaction_segments(message: &Message) -> Vec<Segment> {
+    let mut segments = Vec::with_capacity(message.reactions.len() * 2);
+    for (index, reaction) in message.reactions.iter().enumerate() {
+        if index > 0 {
+            segments.push((" ".to_owned(), Style::new()));
+        }
+        let label = match reaction.emoji.id {
+            Some(_) => format!(":{}:", reaction.emoji.name),
+            None => reaction.emoji.name.clone(),
+        };
+        let style = if reaction.me { REACTION_MINE } else { REACTION };
+        segments.push((format!(" {label} {} ", reaction.count), style));
+    }
+    segments
 }
 
 fn header_line(store: &Store, message: &Message, time: &DateTime<Local>) -> Line<'static> {
@@ -366,5 +409,33 @@ mod tests {
     fn truncates_with_ellipsis() {
         assert_eq!(truncate("hello world", 6), "hello…");
         assert_eq!(truncate("hi", 6), "hi");
+    }
+
+    #[test]
+    fn reactions_render_with_counts() {
+        use plume_core::models::{Emoji, Reaction};
+        let message = Message {
+            reactions: vec![
+                Reaction {
+                    emoji: Emoji {
+                        name: "👍".into(),
+                        id: None,
+                    },
+                    count: 3,
+                    me: true,
+                },
+                Reaction {
+                    emoji: Emoji {
+                        name: "blob".into(),
+                        id: Some(Snowflake(1)),
+                    },
+                    count: 1,
+                    me: false,
+                },
+            ],
+            ..Message::default()
+        };
+        let text: String = reaction_segments(&message).into_iter().map(|(t, _)| t).collect();
+        assert_eq!(text, " 👍 3   :blob: 1 ");
     }
 }

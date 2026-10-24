@@ -144,6 +144,7 @@ async fn identify_ready_messages_and_resume_after_reconnect() {
         guilds,
         channels,
         users,
+        ..
     } = next_event(&mut events).await
     else {
         panic!("expected READY");
@@ -177,6 +178,7 @@ async fn identify_ready_messages_and_resume_after_reconnect() {
     assert_eq!(resume["d"]["session_id"], "session-1");
     assert_eq!(resume["d"]["seq"], 2);
     client.dispatch(3, "RESUMED", json!({})).await;
+    assert_eq!(next_event(&mut events).await, Event::Disconnected);
     assert_eq!(next_event(&mut events).await, Event::Resumed);
 
     // Unknown events and broken event data don't break the connection.
@@ -205,11 +207,17 @@ async fn heartbeats_and_zombie_connections() {
     assert_eq!(client.recv(true).await["op"], 2);
     client.dispatch(1, "READY", ready(&url)).await;
 
-    // A heartbeat arrives within one interval, carrying the sequence number.
+    // A heartbeat arrives within one interval. The first one may beat READY
+    // (the first beat is at a random point), so its sequence may be null.
     let beat = client.recv(false).await;
-    assert_eq!(beat, json!({ "op": 1, "d": 1 }));
+    assert_eq!(beat["op"], 1);
+    assert!(beat["d"] == json!(1) || beat["d"].is_null(), "{beat}");
     client.send(json!({ "op": 11 })).await;
-    assert_eq!(client.recv(false).await["op"], 1);
+    assert_eq!(
+        client.recv(false).await,
+        json!({ "op": 1, "d": 1 }),
+        "later beats carry the sequence"
+    );
 
     // Discord can ask for a beat right away.
     client.send(json!({ "op": 11 })).await;

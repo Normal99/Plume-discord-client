@@ -14,6 +14,8 @@ mod ast;
 mod emoji;
 mod mentions;
 mod parser;
+mod shortcodes;
 
 pub use ast::{Node, Piece, Span, Style, flatten};
 pub use parser::parse;
+pub use shortcodes::{replace_shortcodes, shortcode};

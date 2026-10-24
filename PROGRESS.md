@@ -26,6 +26,27 @@ Windows). If something breaks, that file is the most useful thing to send.
 
 ## Changelog
 
+### Milestone 2: everyday chat features (in review)
+
+- **Reply, edit, delete:** with the box empty, press `↑` to pick a message,
+  then `r` to reply, `e` to edit your own, `d` to delete (it asks first).
+- **Reactions:** shown under each message with counts (yours highlighted),
+  live as people react. `+` reacts with any emoji or `:shortcode:`, and `1`–`9`
+  toggles an existing one.
+- **Older messages:** scrolling past the top loads the page before. Memory
+  stays bounded: scrollback is dropped when you leave the channel.
+- **Unread state synced with Discord:** what you've read on your phone shows
+  as read here at launch, and reading here marks it read everywhere. Channels
+  aren't marked read while the terminal window is in the background.
+- **Muted servers and channels** are dimmed and don't count as unread (pings
+  still do).
+- **Channels you can't see are hidden**, using your roles and the channel's
+  permissions, same as the official client.
+- **`:shortcode:` emoji** in messages are sent as real emoji (`:fire:` → 🔥).
+- **`o` opens a link or attachment** in your browser (web links only).
+- **Connection status** shows "reconnecting…" when the network drops.
+- 97 tests now.
+
 ### Milestone 1: it builds again (in review)
 
 The original upload was missing the two crates everything depends on, so

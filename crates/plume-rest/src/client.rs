@@ -14,7 +14,7 @@ use tracing::{debug, warn};
 
 use crate::errors::RestError;
 use crate::ratelimit::RateLimiter;
-use crate::routes::Route;
+use crate::routes::{Route, encode_emoji};
 
 const API_BASE: &str = "https://discord.com/api/v9";
 
@@ -64,8 +64,22 @@ impl RestClient {
 
     /// The newest `limit` (max 100) messages in a channel, oldest first.
     pub async fn messages(&self, channel_id: Snowflake, limit: u8) -> Result<Vec<(Message, User)>, RestError> {
+        self.messages_before(channel_id, None, limit).await
+    }
+
+    /// Up to `limit` (max 100) messages older than `before` (or the newest,
+    /// if `None`), oldest first.
+    pub async fn messages_before(
+        &self,
+        channel_id: Snowflake,
+        before: Option<Snowflake>,
+        limit: u8,
+    ) -> Result<Vec<(Message, User)>, RestError> {
         let route = Route::GetMessages { channel_id };
-        let query = format!("?limit={}", limit.clamp(1, 100));
+        let mut query = format!("?limit={}", limit.clamp(1, 100));
+        if let Some(before) = before {
+            query.push_str(&format!("&before={before}"));
+        }
         let wire: Vec<WireMessage> = self.request_with_query(route, &query, None).await?;
         // Discord sends newest first.
         Ok(wire.into_iter().rev().map(WireMessage::into_models).collect())
@@ -89,6 +103,59 @@ impl RestClient {
         }
         let wire: WireMessage = self.request(Route::CreateMessage { channel_id }, Some(body)).await?;
         Ok(wire.into_models())
+    }
+
+    /// Changes the text of one of your messages.
+    pub async fn edit_message(
+        &self,
+        channel_id: Snowflake,
+        message_id: Snowflake,
+        content: &str,
+    ) -> Result<(Message, User), RestError> {
+        let route = Route::EditMessage { channel_id, message_id };
+        let wire: WireMessage = self.request(route, Some(json!({ "content": content }))).await?;
+        Ok(wire.into_models())
+    }
+
+    pub async fn delete_message(&self, channel_id: Snowflake, message_id: Snowflake) -> Result<(), RestError> {
+        self.send(Route::DeleteMessage { channel_id, message_id }, "", None)
+            .await?;
+        Ok(())
+    }
+
+    /// Marks the channel read up to `message_id`, so other devices agree.
+    pub async fn ack(&self, channel_id: Snowflake, message_id: Snowflake) -> Result<(), RestError> {
+        let body = json!({ "token": null });
+        self.send(Route::Ack { channel_id, message_id }, "", Some(body)).await?;
+        Ok(())
+    }
+
+    /// Adds (or with `add: false`, removes) your reaction. `id` is set for
+    /// custom emoji.
+    pub async fn react(
+        &self,
+        channel_id: Snowflake,
+        message_id: Snowflake,
+        name: &str,
+        id: Option<Snowflake>,
+        add: bool,
+    ) -> Result<(), RestError> {
+        let emoji = encode_emoji(name, id);
+        let route = if add {
+            Route::AddReaction {
+                channel_id,
+                message_id,
+                emoji,
+            }
+        } else {
+            Route::RemoveReaction {
+                channel_id,
+                message_id,
+                emoji,
+            }
+        };
+        self.send(route, "", None).await?;
+        Ok(())
     }
 
     /// Shows "… is typing" to others for ~10 seconds.
@@ -119,7 +186,9 @@ impl RestClient {
     /// Sends a request through the rate limiter, retrying on 429.
     async fn send(&self, route: Route, query: &str, body: Option<serde_json::Value>) -> Result<Response, RestError> {
         let key = route.bucket_key();
-        let url = format!("{API_BASE}{}{query}", route.path());
+        let path = route.path();
+        let method = route.method();
+        let url = format!("{API_BASE}{path}{query}");
 
         for _ in 0..MAX_ATTEMPTS {
             self.inner.limiter.acquire(&key).await;
@@ -127,12 +196,12 @@ impl RestClient {
             let mut request = self
                 .inner
                 .http
-                .request(route.method(), &url)
+                .request(method.clone(), &url)
                 .header(AUTHORIZATION, self.inner.auth.clone());
             if let Some(body) = &body {
                 request = request.json(body);
             }
-            debug!("{} {}", route.method(), route.path());
+            debug!("{method} {path}");
             let response = request.send().await?;
             self.inner.limiter.update(&key, response.headers());
 

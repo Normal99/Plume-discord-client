@@ -3,8 +3,13 @@
 //! Shared JSON shapes live in `plume_core::wire`; the ones here only exist
 //! in gateway events.
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use plume_core::models::User;
-use plume_core::wire::{WireChannel, WireGuild, WireMessage, WireUser};
+use plume_core::wire::{
+    WireChannel, WireEmoji, WireGuild, WireGuildProperties, WireGuildSettings, WireList, WireMember, WireMessage,
+    WireReadState, WireRole, WireUser,
+};
 use plume_core::{Event, Snowflake};
 use serde::Deserialize;
 use serde_json::value::RawValue;
@@ -23,7 +28,9 @@ impl From<Event> for Decoded {
     }
 }
 
-pub fn decode(name: &str, data: &RawValue) -> Result<Decoded, serde_json::Error> {
+/// Decodes one dispatch. `me` is the logged-in user (known after READY),
+/// used to find your own roles in GUILD_CREATE.
+pub fn decode(name: &str, data: &RawValue, me: Option<Snowflake>) -> Result<Decoded, serde_json::Error> {
     let json = data.get();
     let event = match name {
         "READY" => {
@@ -33,8 +40,88 @@ pub fn decode(name: &str, data: &RawValue) -> Result<Decoded, serde_json::Error>
         "RESUMED" => Event::Resumed,
         "GUILD_CREATE" => {
             let guild: WireGuild = serde_json::from_str(json)?;
-            let (guild, channels) = guild.into_models();
+            let (guild, channels) = guild.into_models(me);
             Event::GuildCreate { guild, channels }
+        }
+        "GUILD_UPDATE" => {
+            let update: WireGuildUpdate = serde_json::from_str(json)?;
+            let (name, owner_id) = match update.properties {
+                Some(p) => (p.name.or(update.name), p.owner_id.or(update.owner_id)),
+                None => (update.name, update.owner_id),
+            };
+            Event::GuildUpdate {
+                id: update.id,
+                name,
+                owner_id,
+                roles: update
+                    .roles
+                    .map(|roles| roles.into_iter().map(WireRole::into_model).collect()),
+            }
+        }
+        "GUILD_MEMBER_UPDATE" => {
+            let update: WireMemberUpdate = serde_json::from_str(json)?;
+            match update.member.user_id() {
+                Some(user_id) => Event::MemberUpdate {
+                    guild_id: update.guild_id,
+                    user_id,
+                    roles: update.member.roles,
+                },
+                None => Event::Other(name.to_owned()),
+            }
+        }
+        "GUILD_ROLE_CREATE" | "GUILD_ROLE_UPDATE" => {
+            let update: WireRoleUpdate = serde_json::from_str(json)?;
+            Event::RoleUpsert {
+                guild_id: update.guild_id,
+                role: update.role.into_model(),
+            }
+        }
+        "GUILD_ROLE_DELETE" => {
+            let gone: WireRoleDelete = serde_json::from_str(json)?;
+            Event::RoleDelete {
+                guild_id: gone.guild_id,
+                role_id: gone.role_id,
+            }
+        }
+        "MESSAGE_REACTION_ADD" | "MESSAGE_REACTION_REMOVE" => {
+            let reaction: WireReactionEvent = serde_json::from_str(json)?;
+            let (channel_id, message_id, emoji) =
+                (reaction.channel_id, reaction.message_id, reaction.emoji.into_model());
+            let user_id = reaction.user_id;
+            if name == "MESSAGE_REACTION_ADD" {
+                Event::ReactionAdd {
+                    channel_id,
+                    message_id,
+                    user_id,
+                    emoji,
+                }
+            } else {
+                Event::ReactionRemove {
+                    channel_id,
+                    message_id,
+                    user_id,
+                    emoji,
+                }
+            }
+        }
+        "MESSAGE_REACTION_REMOVE_ALL" | "MESSAGE_REACTION_REMOVE_EMOJI" => {
+            let clear: WireReactionClear = serde_json::from_str(json)?;
+            Event::ReactionClear {
+                channel_id: clear.channel_id,
+                message_id: clear.message_id,
+                emoji: clear.emoji.map(WireEmoji::into_model),
+            }
+        }
+        "MESSAGE_ACK" => {
+            let ack: WireAck = serde_json::from_str(json)?;
+            Event::MessageAck {
+                channel_id: ack.channel_id,
+                message_id: ack.message_id,
+            }
+        }
+        "USER_GUILD_SETTINGS_UPDATE" => {
+            let settings: WireGuildSettings = serde_json::from_str(json)?;
+            Event::GuildSettingsUpdate(settings.into_model(now_unix()))
         }
         "GUILD_DELETE" => {
             let gone: WireGuildDelete = serde_json::from_str(json)?;
@@ -95,16 +182,33 @@ struct WireReady {
     private_channels: Vec<WireChannel>,
     #[serde(default)]
     users: Vec<WireUser>,
+    /// Your member object in each guild, in the same order as `guilds`.
+    #[serde(default)]
+    merged_members: Vec<Vec<WireMember>>,
+    #[serde(default)]
+    read_state: WireList<WireReadState>,
+    #[serde(default)]
+    user_guild_settings: WireList<WireGuildSettings>,
 }
 
 impl WireReady {
     fn into_decoded(self) -> Decoded {
+        let me = self.user.id;
         let mut guilds = Vec::with_capacity(self.guilds.len());
         let mut channels = Vec::new();
         let mut users: Vec<User> = self.users.into_iter().map(WireUser::into_model).collect();
 
-        for guild in self.guilds.into_iter().filter(|g| !g.unavailable) {
-            let (guild, guild_channels) = guild.into_models();
+        let mut merged_members = self.merged_members.into_iter();
+        for guild in self.guilds {
+            // Keep the two lists in step, even for guilds we skip.
+            let members = merged_members.next().unwrap_or_default();
+            if guild.unavailable {
+                continue;
+            }
+            let (mut guild, guild_channels) = guild.into_models(Some(me));
+            if guild.my_roles.is_none() {
+                guild.my_roles = members.into_iter().find(|m| m.user_id() == Some(me)).map(|m| m.roles);
+            }
             guilds.push(guild);
             channels.extend(guild_channels);
         }
@@ -120,6 +224,18 @@ impl WireReady {
                 guilds,
                 channels,
                 users,
+                read_states: self
+                    .read_state
+                    .into_vec()
+                    .into_iter()
+                    .filter_map(WireReadState::into_model)
+                    .collect(),
+                settings: self
+                    .user_guild_settings
+                    .into_vec()
+                    .into_iter()
+                    .map(|s| s.into_model(now_unix()))
+                    .collect(),
             },
             session: Some(ResumeState {
                 session_id: self.session_id,
@@ -127,6 +243,66 @@ impl WireReady {
             }),
         }
     }
+}
+
+fn now_unix() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
+#[derive(Deserialize)]
+struct WireGuildUpdate {
+    id: Snowflake,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    owner_id: Option<Snowflake>,
+    #[serde(default)]
+    properties: Option<WireGuildProperties>,
+    #[serde(default)]
+    roles: Option<Vec<WireRole>>,
+}
+
+#[derive(Deserialize)]
+struct WireMemberUpdate {
+    guild_id: Snowflake,
+    #[serde(flatten)]
+    member: WireMember,
+}
+
+#[derive(Deserialize)]
+struct WireRoleUpdate {
+    guild_id: Snowflake,
+    role: WireRole,
+}
+
+#[derive(Deserialize)]
+struct WireRoleDelete {
+    guild_id: Snowflake,
+    role_id: Snowflake,
+}
+
+#[derive(Deserialize)]
+struct WireReactionEvent {
+    channel_id: Snowflake,
+    message_id: Snowflake,
+    user_id: Snowflake,
+    emoji: WireEmoji,
+}
+
+#[derive(Deserialize)]
+struct WireReactionClear {
+    channel_id: Snowflake,
+    message_id: Snowflake,
+    #[serde(default)]
+    emoji: Option<WireEmoji>,
+}
+
+#[derive(Deserialize)]
+struct WireAck {
+    channel_id: Snowflake,
+    message_id: Snowflake,
 }
 
 #[derive(Deserialize)]
@@ -167,7 +343,7 @@ mod tests {
 
     fn decode_str(name: &str, json: &str) -> Decoded {
         let raw = RawValue::from_string(json.to_owned()).unwrap();
-        decode(name, &raw).unwrap()
+        decode(name, &raw, Some(Snowflake(1))).unwrap()
     }
 
     #[test]
@@ -217,6 +393,7 @@ mod tests {
             guilds,
             channels,
             users,
+            ..
         } = decoded.event
         else {
             panic!("wrong event");
@@ -229,6 +406,73 @@ mod tests {
         assert_eq!(channels[1].kind, ChannelKind::Dm);
         assert_eq!(channels[1].recipients, [Snowflake(5)]);
         assert_eq!(users[0].username, "friend");
+    }
+
+    #[test]
+    fn ready_roles_read_states_and_mutes() {
+        let decoded = decode_str(
+            "READY",
+            r#"{
+                "user": { "id": "1", "username": "me" },
+                "session_id": "abc", "resume_gateway_url": "wss://r",
+                "guilds": [
+                    { "id": "9", "unavailable": true },
+                    { "id": "10", "properties": { "name": "S" }, "roles": [{ "id": "10", "permissions": "1024" }], "channels": [] }
+                ],
+                "merged_members": [[], [{ "user_id": "1", "roles": ["30"] }]],
+                "read_state": { "version": 1, "partial": false, "entries": [{ "id": "100", "last_message_id": "5", "mention_count": 1 }] },
+                "user_guild_settings": { "version": 1, "partial": false, "entries": [{ "guild_id": "10", "muted": true }] }
+            }"#,
+        );
+        let Event::Ready {
+            guilds,
+            read_states,
+            settings,
+            ..
+        } = decoded.event
+        else {
+            panic!("wrong event");
+        };
+        assert_eq!(guilds.len(), 1);
+        assert_eq!(
+            guilds[0].my_roles,
+            Some(vec![Snowflake(30)]),
+            "merged_members lines up with guilds"
+        );
+        assert_eq!(read_states[0].mentions, 1);
+        assert!(settings[0].muted);
+    }
+
+    #[test]
+    fn member_role_and_ack_events() {
+        let member = decode_str(
+            "GUILD_MEMBER_UPDATE",
+            r#"{ "guild_id": "10", "user": { "id": "1" }, "roles": ["2"], "nick": null }"#,
+        );
+        assert_eq!(
+            member.event,
+            Event::MemberUpdate {
+                guild_id: Snowflake(10),
+                user_id: Snowflake(1),
+                roles: vec![Snowflake(2)]
+            }
+        );
+        let role = decode_str(
+            "GUILD_ROLE_UPDATE",
+            r#"{ "guild_id": "10", "role": { "id": "2", "permissions": "8" } }"#,
+        );
+        assert!(matches!(role.event, Event::RoleUpsert { role, .. } if role.permissions == 8));
+        let ack = decode_str(
+            "MESSAGE_ACK",
+            r#"{ "channel_id": "100", "message_id": "5", "version": 3 }"#,
+        );
+        assert_eq!(
+            ack.event,
+            Event::MessageAck {
+                channel_id: Snowflake(100),
+                message_id: Snowflake(5)
+            }
+        );
     }
 
     #[test]

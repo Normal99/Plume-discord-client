@@ -9,6 +9,7 @@ mod app;
 mod input;
 mod layout;
 mod login;
+mod open;
 mod render;
 mod sidebar;
 mod text;

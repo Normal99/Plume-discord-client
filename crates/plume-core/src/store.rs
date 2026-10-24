@@ -6,10 +6,10 @@
 //! number of the newest ones.
 
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::models::{Channel, Guild, Message, User};
-use crate::{Event, Profile, Snowflake};
+use crate::models::{Channel, Guild, GuildSettings, Message, Reaction, ReadState, User};
+use crate::{Event, Profile, Snowflake, permissions};
 
 /// Unread state for a channel (or, summed, for a whole server).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -26,7 +26,16 @@ struct History {
     /// The newest page has been fetched. Until then `messages` only holds
     /// what arrived live while the fetch was running.
     loaded: bool,
+    /// How many messages were cached after the last older page; nonzero
+    /// while scrolled back, which lifts the cap until the channel is left.
+    scrollback: usize,
+    /// There's nothing older to fetch.
+    reached_start: bool,
 }
+
+/// However far you scroll, at most this many profile-caps of messages are
+/// kept for one channel.
+const MAX_SCROLLBACK_FACTOR: usize = 10;
 
 pub struct Store {
     profile: Profile,
@@ -39,6 +48,10 @@ pub struct Store {
     recent: VecDeque<Snowflake>,
     active: Option<Snowflake>,
     unread: HashMap<Snowflake, Unread>,
+    /// The newest message read per channel, synced with Discord.
+    last_read: HashMap<Snowflake, Snowflake>,
+    /// Muted servers, channels and categories.
+    muted: HashSet<Snowflake>,
 }
 
 impl Store {
@@ -53,6 +66,8 @@ impl Store {
             recent: VecDeque::new(),
             active: None,
             unread: HashMap::new(),
+            last_read: HashMap::new(),
+            muted: HashSet::new(),
         }
     }
 
@@ -110,6 +125,34 @@ impl Store {
         !self.histories.get(&channel_id).is_some_and(|h| h.loaded)
     }
 
+    /// Whether you're allowed to see a channel. DMs, and channels in servers
+    /// where we don't know your roles, count as visible.
+    pub fn can_view(&self, channel_id: Snowflake) -> bool {
+        let Some(channel) = self.channels.get(&channel_id) else {
+            return false;
+        };
+        let (Some(guild), Some(me)) = (channel.guild_id.and_then(|id| self.guilds.get(&id)), &self.me) else {
+            return true;
+        };
+        permissions::can_view(guild, channel, me.id)
+    }
+
+    /// Muted directly, through its category, or through its server.
+    pub fn is_muted(&self, channel_id: Snowflake) -> bool {
+        if self.muted.contains(&channel_id) {
+            return true;
+        }
+        let Some(channel) = self.channels.get(&channel_id) else {
+            return false;
+        };
+        channel.parent_id.is_some_and(|id| self.muted.contains(&id))
+            || channel.guild_id.is_some_and(|id| self.muted.contains(&id))
+    }
+
+    pub fn is_guild_muted(&self, guild_id: Snowflake) -> bool {
+        self.muted.contains(&guild_id)
+    }
+
     pub fn unread(&self, channel_id: Snowflake) -> Unread {
         self.unread.get(&channel_id).copied().unwrap_or_default()
     }
@@ -122,6 +165,7 @@ impl Store {
         guild
             .channels
             .iter()
+            .filter(|id| self.can_view(**id))
             .filter_map(|id| self.unread.get(id))
             .fold(Unread::default(), |sum, u| Unread {
                 messages: sum.messages + u.messages,
@@ -134,6 +178,17 @@ impl Store {
     /// Makes a channel the one being looked at and marks it read. Returns
     /// true if its messages need fetching.
     pub fn open_channel(&mut self, channel_id: Snowflake) -> bool {
+        // Leaving a channel drops what was loaded by scrolling up.
+        let limit = self.message_limit();
+        if let Some(previous) = self.active.filter(|&id| id != channel_id)
+            && let Some(history) = self.histories.get_mut(&previous)
+        {
+            history.scrollback = 0;
+            history.reached_start = false;
+            let excess = history.messages.len().saturating_sub(limit);
+            history.messages.drain(..excess);
+            history.messages.shrink_to_fit();
+        }
         self.active = Some(channel_id);
         self.unread.remove(&channel_id);
 
@@ -145,6 +200,62 @@ impl Store {
             }
         }
         !self.histories.entry(channel_id).or_default().loaded
+    }
+
+    /// Whether there may be older messages to fetch for this channel.
+    pub fn has_older(&self, channel_id: Snowflake) -> bool {
+        self.histories
+            .get(&channel_id)
+            .is_some_and(|h| h.loaded && !h.reached_start)
+    }
+
+    /// Stores a page of messages older than what's cached, from scrolling
+    /// up. A page shorter than `requested` means the start was reached.
+    pub fn insert_older(&mut self, channel_id: Snowflake, page: Vec<(Message, User)>, requested: usize) {
+        let hard_cap = self.message_limit() * MAX_SCROLLBACK_FACTOR;
+        let Some(history) = self.histories.get_mut(&channel_id) else {
+            return;
+        };
+        if page.len() < requested {
+            history.reached_start = true;
+        }
+        let oldest = history.messages.front().map(|m| m.id);
+        let mut older: Vec<Message> = Vec::with_capacity(page.len());
+        for (message, author) in page {
+            if oldest.is_none_or(|oldest| message.id < oldest) {
+                older.push(message);
+            }
+            self.users.insert(author.id, author);
+        }
+        older.sort_by_key(|m| m.id);
+        older.dedup_by_key(|m| m.id);
+        let room = hard_cap.saturating_sub(history.messages.len());
+        if older.len() > room {
+            older.drain(..older.len() - room);
+            history.reached_start = false;
+        }
+        for message in older.into_iter().rev() {
+            history.messages.push_front(message);
+        }
+        history.scrollback = history.messages.len();
+    }
+
+    fn message_limit(&self) -> usize {
+        self.profile.messages_per_channel.max(1)
+    }
+
+    /// Marks everything in a channel as read. Returns the message to
+    /// acknowledge to Discord, if there's anything new since the last time,
+    /// so other devices see it as read too.
+    pub fn mark_read(&mut self, channel_id: Snowflake) -> Option<Snowflake> {
+        self.unread.remove(&channel_id);
+        let newest = self.channels.get(&channel_id)?.last_message_id?;
+        let read = self.last_read.entry(channel_id).or_insert(Snowflake(0));
+        if *read >= newest {
+            return None;
+        }
+        *read = newest;
+        Some(newest)
     }
 
     /// Stores a page of fetched messages (any order), merged with whatever
@@ -187,6 +298,8 @@ impl Store {
                 guilds,
                 channels,
                 users,
+                read_states,
+                settings,
             } => {
                 self.guilds = guilds.into_iter().map(|g| (g.id, g)).collect();
                 self.channels = channels.into_iter().map(|c| (c.id, c)).collect();
@@ -199,20 +312,133 @@ impl Store {
                 for history in self.histories.values_mut() {
                     history.loaded = false;
                 }
-                let channels = &self.channels;
-                self.unread.retain(|id, _| channels.contains_key(id));
+                self.muted.clear();
+                for entry in settings {
+                    self.apply_settings(entry);
+                }
+                self.apply_read_states(read_states);
             }
-            Event::Resumed | Event::TypingStart { .. } | Event::Other(_) => {}
-            Event::GuildCreate { guild, channels } => {
+            Event::Resumed | Event::Disconnected | Event::TypingStart { .. } | Event::Other(_) => {}
+            Event::GuildCreate { mut guild, channels } => {
                 if let Some(old) = self.guilds.remove(&guild.id) {
                     for id in old.channels {
                         self.channels.remove(&id);
+                    }
+                    if guild.my_roles.is_none() {
+                        guild.my_roles = old.my_roles;
                     }
                 }
                 for channel in channels {
                     self.channels.insert(channel.id, channel);
                 }
                 self.guilds.insert(guild.id, guild);
+            }
+            Event::GuildUpdate {
+                id,
+                name,
+                owner_id,
+                roles,
+            } => {
+                if let Some(guild) = self.guilds.get_mut(&id) {
+                    if let Some(name) = name {
+                        guild.name = name;
+                    }
+                    if owner_id.is_some() {
+                        guild.owner_id = owner_id;
+                    }
+                    if let Some(roles) = roles {
+                        guild.roles = roles;
+                    }
+                }
+            }
+            Event::MemberUpdate {
+                guild_id,
+                user_id,
+                roles,
+            } => {
+                if self.me.as_ref().is_some_and(|me| me.id == user_id)
+                    && let Some(guild) = self.guilds.get_mut(&guild_id)
+                {
+                    guild.my_roles = Some(roles);
+                }
+            }
+            Event::RoleUpsert { guild_id, role } => {
+                if let Some(guild) = self.guilds.get_mut(&guild_id) {
+                    match guild.roles.iter_mut().find(|r| r.id == role.id) {
+                        Some(existing) => *existing = role,
+                        None => guild.roles.push(role),
+                    }
+                }
+            }
+            Event::RoleDelete { guild_id, role_id } => {
+                if let Some(guild) = self.guilds.get_mut(&guild_id) {
+                    guild.roles.retain(|r| r.id != role_id);
+                    if let Some(roles) = &mut guild.my_roles {
+                        roles.retain(|&r| r != role_id);
+                    }
+                }
+            }
+            Event::MessageAck { channel_id, message_id } => {
+                let read = self.last_read.entry(channel_id).or_insert(message_id);
+                *read = (*read).max(message_id);
+                let newest = self.channels.get(&channel_id).and_then(|c| c.last_message_id);
+                if newest.is_none_or(|newest| message_id >= newest) {
+                    self.unread.remove(&channel_id);
+                }
+            }
+            Event::GuildSettingsUpdate(settings) => self.apply_settings(settings),
+            Event::ReactionAdd {
+                channel_id,
+                message_id,
+                user_id,
+                emoji,
+            } => {
+                let mine = self.me.as_ref().is_some_and(|me| me.id == user_id);
+                if let Some(message) = self.message_mut(channel_id, message_id) {
+                    match message.reactions.iter_mut().find(|r| r.emoji == emoji) {
+                        // Our own reaction can arrive twice (two devices); count it once.
+                        Some(reaction) if mine && reaction.me => {}
+                        Some(reaction) => {
+                            reaction.count += 1;
+                            reaction.me |= mine;
+                        }
+                        None => message.reactions.push(Reaction {
+                            emoji,
+                            count: 1,
+                            me: mine,
+                        }),
+                    }
+                }
+            }
+            Event::ReactionRemove {
+                channel_id,
+                message_id,
+                user_id,
+                emoji,
+            } => {
+                let mine = self.me.as_ref().is_some_and(|me| me.id == user_id);
+                if let Some(message) = self.message_mut(channel_id, message_id)
+                    && let Some(reaction) = message.reactions.iter_mut().find(|r| r.emoji == emoji)
+                    && (!mine || reaction.me)
+                {
+                    reaction.count = reaction.count.saturating_sub(1);
+                    if mine {
+                        reaction.me = false;
+                    }
+                    message.reactions.retain(|r| r.count > 0);
+                }
+            }
+            Event::ReactionClear {
+                channel_id,
+                message_id,
+                emoji,
+            } => {
+                if let Some(message) = self.message_mut(channel_id, message_id) {
+                    match emoji {
+                        Some(emoji) => message.reactions.retain(|r| r.emoji != emoji),
+                        None => message.reactions.clear(),
+                    }
+                }
             }
             Event::GuildDelete { id, unavailable } => {
                 // During an outage the server is still there; keep showing it.
@@ -287,12 +513,18 @@ impl Store {
         if from_me {
             // Sent from here or another device: either way, it's been read.
             self.unread.remove(&channel_id);
+            self.last_read.insert(channel_id, message.id);
         } else if Some(channel_id) != self.active {
             let pings_me = is_dm || message.mention_everyone || me.is_some_and(|me| message.mentions.contains(&me));
-            let unread = self.unread.entry(channel_id).or_default();
-            unread.messages = unread.messages.saturating_add(1);
-            if pings_me {
-                unread.mentions = unread.mentions.saturating_add(1);
+            let muted = self.is_muted(channel_id);
+            if pings_me || !muted {
+                let unread = self.unread.entry(channel_id).or_default();
+                if !muted {
+                    unread.messages = unread.messages.saturating_add(1);
+                }
+                if pings_me {
+                    unread.mentions = unread.mentions.saturating_add(1);
+                }
             }
         }
 
@@ -314,9 +546,68 @@ impl Store {
                 }
             }
         }
-        if messages.len() > self.profile.messages_per_channel.max(1) {
+        // While scrolled back, keep everything (up to the hard cap) so the
+        // page being read doesn't vanish as new messages come in.
+        let limit = self.profile.messages_per_channel.max(1);
+        let cap = if history.scrollback > 0 {
+            limit * MAX_SCROLLBACK_FACTOR
+        } else {
+            limit
+        };
+        if messages.len() > cap {
             messages.pop_front();
         }
+    }
+
+    /// Unread state at login, from where you'd read up to on any device.
+    /// We don't know how many messages you missed, only that there are some.
+    fn apply_read_states(&mut self, read_states: Vec<ReadState>) {
+        self.last_read = read_states.iter().map(|r| (r.channel_id, r.last_read)).collect();
+        self.unread.clear();
+        for state in read_states {
+            let Some(channel) = self.channels.get(&state.channel_id) else {
+                continue;
+            };
+            let has_new = channel.last_message_id.is_some_and(|newest| newest > state.last_read);
+            if Some(channel.id) == self.active || !has_new || !self.can_view(channel.id) {
+                continue;
+            }
+            let unread = Unread {
+                messages: u32::from(!self.is_muted(channel.id)),
+                mentions: state.mentions,
+            };
+            if unread != Unread::default() {
+                self.unread.insert(channel.id, unread);
+            }
+        }
+    }
+
+    fn apply_settings(&mut self, settings: GuildSettings) {
+        // Replace what we knew for this server (or for DMs).
+        let previous: Vec<Snowflake> = match settings.guild_id {
+            Some(guild_id) => {
+                self.muted.remove(&guild_id);
+                self.guilds
+                    .get(&guild_id)
+                    .map(|g| g.channels.clone())
+                    .unwrap_or_default()
+            }
+            None => self
+                .channels
+                .values()
+                .filter(|c| c.kind.is_private())
+                .map(|c| c.id)
+                .collect(),
+        };
+        for id in previous {
+            self.muted.remove(&id);
+        }
+        if settings.muted
+            && let Some(guild_id) = settings.guild_id
+        {
+            self.muted.insert(guild_id);
+        }
+        self.muted.extend(settings.muted_channels);
     }
 
     fn message_mut(&mut self, channel_id: Snowflake, id: Snowflake) -> Option<&mut Message> {
@@ -329,6 +620,8 @@ impl Store {
         self.channels.remove(&id);
         self.histories.remove(&id);
         self.unread.remove(&id);
+        self.last_read.remove(&id);
+        self.muted.remove(&id);
         self.recent.retain(|&c| c != id);
         if self.active == Some(id) {
             self.active = None;
@@ -386,6 +679,7 @@ mod tests {
             position: 0,
             recipients: Vec::new(),
             last_message_id: None,
+            overwrites: Vec::new(),
         }
     }
 
@@ -400,6 +694,7 @@ mod tests {
             mentions: Vec::new(),
             mention_everyone: false,
             attachments: Vec::new(),
+            reactions: Vec::new(),
         }
     }
 
@@ -411,6 +706,7 @@ mod tests {
                 id: Snowflake(10),
                 name: "g".into(),
                 channels: vec![Snowflake(100), Snowflake(101), Snowflake(102)],
+                ..Guild::default()
             }],
             channels: vec![
                 channel(100, Some(10), ChannelKind::Text),
@@ -419,6 +715,8 @@ mod tests {
                 channel(200, None, ChannelKind::Dm),
             ],
             users: vec![user(2)],
+            read_states: Vec::new(),
+            settings: Vec::new(),
         });
         store
     }
@@ -609,8 +907,282 @@ mod tests {
             guilds: Vec::new(),
             channels: Vec::new(),
             users: Vec::new(),
+            read_states: Vec::new(),
+            settings: Vec::new(),
         });
         assert!(store.needs_history(Snowflake(100)));
         assert_eq!(ids(&store, 100), [1], "old messages stay visible until the refetch");
+    }
+
+    #[test]
+    fn read_states_from_login() {
+        let mut store = Store::new(Profile::STANDARD);
+        let with_last = |id, last| Channel {
+            last_message_id: Some(Snowflake(last)),
+            ..channel(id, Some(10), ChannelKind::Text)
+        };
+        let read = |channel, last_read, mentions| ReadState {
+            channel_id: Snowflake(channel),
+            last_read: Snowflake(last_read),
+            mentions,
+        };
+        store.apply(Event::Ready {
+            me: user(1),
+            guilds: vec![Guild {
+                id: Snowflake(10),
+                channels: vec![Snowflake(100), Snowflake(101), Snowflake(102)],
+                ..Guild::default()
+            }],
+            channels: vec![with_last(100, 50), with_last(101, 50), with_last(102, 50)],
+            users: Vec::new(),
+            read_states: vec![read(100, 50, 0), read(101, 40, 2), read(102, 49, 0)],
+            settings: vec![GuildSettings {
+                guild_id: Some(Snowflake(10)),
+                muted: false,
+                muted_channels: vec![Snowflake(102)],
+            }],
+        });
+        assert_eq!(store.unread(Snowflake(100)), Unread::default(), "read up to the newest");
+        assert_eq!(
+            store.unread(Snowflake(101)),
+            Unread {
+                messages: 1,
+                mentions: 2
+            }
+        );
+        assert_eq!(store.unread(Snowflake(102)), Unread::default(), "muted, no pings");
+
+        // Opening a channel returns what to acknowledge, once.
+        store.open_channel(Snowflake(101));
+        assert_eq!(store.mark_read(Snowflake(101)), Some(Snowflake(50)));
+        assert_eq!(store.mark_read(Snowflake(101)), None);
+        assert_eq!(store.mark_read(Snowflake(100)), None, "already read on another device");
+    }
+
+    #[test]
+    fn acks_from_other_devices_clear_unread() {
+        let mut store = ready_store(Profile::STANDARD);
+        store.open_channel(Snowflake(100));
+        create(&mut store, message(5, 101, 2));
+        create(&mut store, message(6, 101, 2));
+        store.apply(Event::MessageAck {
+            channel_id: Snowflake(101),
+            message_id: Snowflake(5),
+        });
+        assert_eq!(store.unread(Snowflake(101)).messages, 2, "read only part of it");
+        store.apply(Event::MessageAck {
+            channel_id: Snowflake(101),
+            message_id: Snowflake(6),
+        });
+        assert_eq!(store.unread(Snowflake(101)), Unread::default());
+    }
+
+    #[test]
+    fn muted_channels_count_pings_but_not_messages() {
+        let mut store = ready_store(Profile::STANDARD);
+        store.apply(Event::GuildSettingsUpdate(GuildSettings {
+            guild_id: Some(Snowflake(10)),
+            muted: true,
+            muted_channels: vec![],
+        }));
+        assert!(store.is_muted(Snowflake(100)) && store.is_guild_muted(Snowflake(10)));
+        create(&mut store, message(5, 100, 2));
+        create(
+            &mut store,
+            Message {
+                mentions: vec![Snowflake(1)],
+                ..message(6, 100, 2)
+            },
+        );
+        assert_eq!(
+            store.unread(Snowflake(100)),
+            Unread {
+                messages: 0,
+                mentions: 1
+            }
+        );
+
+        // A new settings update replaces the old one.
+        store.apply(Event::GuildSettingsUpdate(GuildSettings {
+            guild_id: Some(Snowflake(10)),
+            muted: false,
+            muted_channels: vec![Snowflake(101)],
+        }));
+        assert!(!store.is_muted(Snowflake(100)));
+        assert!(store.is_muted(Snowflake(101)));
+    }
+
+    #[test]
+    fn hidden_channels_and_role_changes() {
+        use crate::models::{Overwrite, OverwriteKind, Role};
+        let mut store = ready_store(Profile::STANDARD);
+        let staff = Channel {
+            overwrites: vec![
+                Overwrite {
+                    id: Snowflake(10),
+                    kind: OverwriteKind::Role,
+                    allow: 0,
+                    deny: permissions::VIEW_CHANNEL,
+                },
+                Overwrite {
+                    id: Snowflake(30),
+                    kind: OverwriteKind::Role,
+                    allow: permissions::VIEW_CHANNEL,
+                    deny: 0,
+                },
+            ],
+            ..channel(103, Some(10), ChannelKind::Text)
+        };
+        store.apply(Event::ChannelUpsert(staff));
+        assert!(store.can_view(Snowflake(103)), "roles unknown: shown");
+
+        store.apply(Event::RoleUpsert {
+            guild_id: Snowflake(10),
+            role: Role {
+                id: Snowflake(10),
+                permissions: permissions::VIEW_CHANNEL,
+            },
+        });
+        store.apply(Event::MemberUpdate {
+            guild_id: Snowflake(10),
+            user_id: Snowflake(1),
+            roles: vec![],
+        });
+        assert!(!store.can_view(Snowflake(103)));
+        assert!(store.can_view(Snowflake(100)));
+
+        create(
+            &mut store,
+            Message {
+                mentions: vec![Snowflake(1)],
+                ..message(5, 103, 2)
+            },
+        );
+        assert_eq!(
+            store.guild_unread(Snowflake(10)),
+            Unread::default(),
+            "hidden channels don't count"
+        );
+
+        store.apply(Event::MemberUpdate {
+            guild_id: Snowflake(10),
+            user_id: Snowflake(2),
+            roles: vec![Snowflake(30)],
+        });
+        assert!(!store.can_view(Snowflake(103)), "someone else's roles don't matter");
+        store.apply(Event::MemberUpdate {
+            guild_id: Snowflake(10),
+            user_id: Snowflake(1),
+            roles: vec![Snowflake(30)],
+        });
+        assert!(store.can_view(Snowflake(103)));
+        store.apply(Event::RoleDelete {
+            guild_id: Snowflake(10),
+            role_id: Snowflake(30),
+        });
+        assert!(!store.can_view(Snowflake(103)));
+        assert!(store.can_view(Snowflake(200)), "DMs are always visible");
+    }
+
+    #[test]
+    fn reactions_add_remove_and_clear() {
+        use crate::models::Emoji;
+        let mut store = ready_store(Profile::STANDARD);
+        store.open_channel(Snowflake(100));
+        store.insert_history(Snowflake(100), vec![(message(1, 100, 2), user(2))]);
+        let thumbs = Emoji {
+            name: "👍".into(),
+            id: None,
+        };
+        let react = |user_id: u64, add: bool| {
+            let (channel_id, message_id, user_id, emoji) =
+                (Snowflake(100), Snowflake(1), Snowflake(user_id), thumbs.clone());
+            if add {
+                Event::ReactionAdd {
+                    channel_id,
+                    message_id,
+                    user_id,
+                    emoji,
+                }
+            } else {
+                Event::ReactionRemove {
+                    channel_id,
+                    message_id,
+                    user_id,
+                    emoji,
+                }
+            }
+        };
+        let reactions = |store: &Store| store.message(Snowflake(100), Snowflake(1)).unwrap().reactions.clone();
+
+        store.apply(react(2, true));
+        store.apply(react(1, true));
+        store.apply(react(1, true)); // duplicate of ours: ignored
+        assert_eq!(
+            reactions(&store),
+            [Reaction {
+                emoji: thumbs.clone(),
+                count: 2,
+                me: true
+            }]
+        );
+
+        store.apply(react(1, false));
+        store.apply(react(1, false)); // already removed: ignored
+        assert_eq!(
+            reactions(&store),
+            [Reaction {
+                emoji: thumbs.clone(),
+                count: 1,
+                me: false
+            }]
+        );
+        store.apply(react(2, false));
+        assert!(reactions(&store).is_empty());
+
+        store.apply(react(2, true));
+        store.apply(Event::ReactionClear {
+            channel_id: Snowflake(100),
+            message_id: Snowflake(1),
+            emoji: None,
+        });
+        assert!(reactions(&store).is_empty());
+    }
+
+    #[test]
+    fn scrolling_up_loads_older_pages_until_the_start() {
+        let mut store = ready_store(Profile::FEATHER); // cap 50
+        store.open_channel(Snowflake(100));
+        store.insert_history(
+            Snowflake(100),
+            (151..=200).map(|id| (message(id, 100, 2), user(2))).collect(),
+        );
+        assert!(store.has_older(Snowflake(100)));
+
+        store.insert_older(
+            Snowflake(100),
+            (101..=150).map(|id| (message(id, 100, 2), user(2))).collect(),
+            50,
+        );
+        assert_eq!(store.messages(Snowflake(100)).len(), 100, "scrollback raises the cap");
+        create(&mut store, message(201, 100, 2));
+        assert_eq!(
+            store.messages(Snowflake(100)).len(),
+            101,
+            "new messages don't push scrollback out"
+        );
+
+        store.insert_older(
+            Snowflake(100),
+            (90..=100).map(|id| (message(id, 100, 2), user(2))).collect(),
+            50,
+        );
+        assert!(!store.has_older(Snowflake(100)), "short page: that's the start");
+        assert_eq!(ids(&store, 100).first(), Some(&90));
+
+        // Leaving the channel trims it back to the newest 50.
+        store.open_channel(Snowflake(101));
+        assert_eq!(store.messages(Snowflake(100)).len(), 50);
+        assert_eq!(ids(&store, 100).last(), Some(&201));
     }
 }

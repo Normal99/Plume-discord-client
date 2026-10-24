@@ -170,7 +170,12 @@ pub fn sorted_guilds(store: &Store) -> Vec<&Guild> {
 /// A server's text channels in Discord's order: uncategorised ones first,
 /// then each category followed by its channels. Empty categories are skipped.
 pub fn guild_channels(store: &Store, guild: &Guild) -> Vec<Entry> {
-    let channels: Vec<&Channel> = guild.channels.iter().filter_map(|&id| store.channel(id)).collect();
+    let channels: Vec<&Channel> = guild
+        .channels
+        .iter()
+        .filter_map(|&id| store.channel(id))
+        .filter(|c| c.kind == ChannelKind::Category || store.can_view(c.id))
+        .collect();
     let order = |c: &&Channel| (c.position, c.id);
 
     let mut top: Vec<&Channel> = channels

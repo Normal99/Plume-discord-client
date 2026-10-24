@@ -8,6 +8,7 @@ pub mod events;
 pub mod identity;
 pub mod ids;
 pub mod models;
+pub mod permissions;
 pub mod profile;
 pub mod store;
 pub mod token;

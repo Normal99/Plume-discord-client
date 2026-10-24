@@ -65,6 +65,8 @@ pub struct Gateway {
     seq: Option<u64>,
     /// Servers we've asked for typing events in; re-sent after a new READY.
     subscribed: BTreeSet<Snowflake>,
+    /// The logged-in user, from READY.
+    me: Option<Snowflake>,
 }
 
 /// How a connection ended.
@@ -106,6 +108,7 @@ impl Gateway {
             resume: None,
             seq: None,
             subscribed: BTreeSet::new(),
+            me: None,
         }
     }
 
@@ -152,6 +155,9 @@ impl Gateway {
                     backoff
                 }
             };
+            // Let the UI show that we're offline. If the queue is full it's
+            // busy anyway, and READY/RESUMED will follow.
+            let _ = self.events.try_send(Event::Disconnected);
             if !delay.is_zero() {
                 // Up to 50% extra, so many clients don't reconnect in lockstep.
                 let delay = delay.mul_f64(1.0 + jitter() / 2.0);
@@ -238,7 +244,7 @@ impl Gateway {
                     if name == "READY" || name == "RESUMED" {
                         *healthy = true;
                     }
-                    let decoded = match dispatch::decode(name, data) {
+                    let decoded = match dispatch::decode(name, data, self.me) {
                         Ok(decoded) => decoded,
                         Err(error) if name == "READY" => return Err(error.into()),
                         Err(error) => {
@@ -248,6 +254,9 @@ impl Gateway {
                         }
                     };
                     let is_ready = decoded.session.is_some();
+                    if let Event::Ready { me, .. } = &decoded.event {
+                        self.me = Some(me.id);
+                    }
                     if let Some(session) = decoded.session {
                         info!("READY ({} bytes)", data.get().len());
                         self.resume = Some(session);

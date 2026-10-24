@@ -4,11 +4,11 @@ use std::io::stdout;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
-    DisableBracketedPaste, EnableBracketedPaste, Event as TermEvent, EventStream, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers,
+    DisableBracketedPaste, DisableFocusChange, EnableBracketedPaste, EnableFocusChange, Event as TermEvent,
+    EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
 };
 use futures_util::StreamExt;
-use plume_core::models::{Message, User};
+use plume_core::models::{Emoji, Message, User};
 use plume_core::{Event, Snowflake, Store, Tier, Token};
 use plume_gateway::{Gateway, GatewayError, GatewayHandle};
 use plume_rest::{RestClient, RestError};
@@ -28,17 +28,34 @@ const TYPING_TIMEOUT: Duration = Duration::from_secs(10);
 /// So we don't re-send "typing" on every key press.
 const TYPING_RESEND: Duration = Duration::from_secs(8);
 const ERROR_TIMEOUT: Duration = Duration::from_secs(6);
+/// Read acks for the open channel are batched at most this often.
+const ACK_INTERVAL: Duration = Duration::from_secs(3);
+/// Messages fetched per page when scrolling up.
+const OLDER_PAGE: u8 = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Sidebar,
     Input,
+    /// Picking a message to reply to, edit, delete or react to.
+    Messages,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Connection {
     Connecting,
     Online,
+    Reconnecting,
+}
+
+/// What Enter in the input box does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Compose {
+    Message,
+    Reply(Snowflake),
+    Edit(Snowflake),
+    /// The box holds an emoji to react with.
+    React(Snowflake),
 }
 
 /// The Ctrl+K popup.
@@ -57,24 +74,46 @@ enum TaskResult {
         channel_id: Snowflake,
         result: Result<Vec<(Message, User)>, RestError>,
     },
+    Older {
+        channel_id: Snowflake,
+        result: Result<Vec<(Message, User)>, RestError>,
+    },
     Sent {
         text: String,
         result: Result<(Message, User), RestError>,
     },
+    Edited {
+        text: String,
+        result: Result<(Message, User), RestError>,
+    },
+    /// Something with nothing to show on success (delete, react).
+    Done {
+        action: &'static str,
+        result: Result<(), RestError>,
+    },
 }
 
-/// Everything the UI shows and remembers. `render.rs` only reads it.
+/// Everything the UI shows and remembers. `render.rs` only reads it, apart
+/// from the scroll position and a few measurements.
 pub struct App {
     pub store: Store,
     pub sidebar: Sidebar,
     pub sidebar_state: ListState,
     pub focus: Focus,
     pub input: Input,
+    pub compose: Compose,
+    /// The highlighted message while `focus` is `Messages`.
+    pub selected: Option<Snowflake>,
+    /// Waiting for y/n before deleting this message.
+    pub confirm_delete: Option<Snowflake>,
     /// Lines scrolled up from the newest message.
     pub scroll: usize,
     /// Set by the renderer so PgUp/PgDn can move by half a screen.
     pub messages_height: u16,
+    /// Set by the renderer: the oldest loaded message is on screen.
+    pub at_top: bool,
     pub loading_history: bool,
+    pub loading_older: bool,
     pub connection: Connection,
     pub error: Option<(String, Instant)>,
     pub memory_kb: Option<u64>,
@@ -87,6 +126,10 @@ pub struct App {
     /// Who's typing where, and when we last heard about it.
     typing: HashMap<Snowflake, Vec<(Snowflake, Instant)>>,
     last_typing_sent: Option<(Snowflake, Instant)>,
+    last_ack: Option<Instant>,
+    /// The terminal window has focus (if the terminal reports it). Channels
+    /// aren't marked read while you're looking elsewhere.
+    terminal_focused: bool,
     silent_typing: bool,
     history_limit: u8,
     ticks: u32,
@@ -107,7 +150,7 @@ pub async fn run(token: Token, options: Options) -> Result<(), Box<dyn Error>> {
 
     // From here on the terminal is ours; `ratatui::restore` must always run.
     let mut terminal = ratatui::init();
-    let _ = crossterm::execute!(stdout(), EnableBracketedPaste);
+    let _ = crossterm::execute!(stdout(), EnableBracketedPaste, EnableFocusChange);
     let mut terminal_events = EventStream::new();
     let mut ticker = tokio::time::interval(Duration::from_secs(1));
 
@@ -145,7 +188,7 @@ pub async fn run(token: Token, options: Options) -> Result<(), Box<dyn Error>> {
         }
     };
 
-    let _ = crossterm::execute!(stdout(), DisableBracketedPaste);
+    let _ = crossterm::execute!(stdout(), DisableBracketedPaste, DisableFocusChange);
     ratatui::restore();
     result
 }
@@ -163,9 +206,14 @@ impl App {
             sidebar_state: ListState::default(),
             focus: Focus::Sidebar,
             input: Input::default(),
+            compose: Compose::Message,
+            selected: None,
+            confirm_delete: None,
             scroll: 0,
             messages_height: 0,
+            at_top: false,
             loading_history: false,
+            loading_older: false,
             connection: Connection::Connecting,
             error: None,
             memory_kb: resident_memory_kb(),
@@ -176,6 +224,8 @@ impl App {
             tasks,
             typing: HashMap::new(),
             last_typing_sent: None,
+            last_ack: None,
+            terminal_focused: true,
             silent_typing: options.silent_typing,
             history_limit: options.profile.messages_per_channel.min(100) as u8,
             ticks: 0,
@@ -205,6 +255,11 @@ impl App {
                     self.refilter_switcher();
                 }
             }
+            TermEvent::FocusGained => {
+                self.terminal_focused = true;
+                self.ack_active(true);
+            }
+            TermEvent::FocusLost => self.terminal_focused = false,
             TermEvent::Resize(..) => {}
             _ => return,
         }
@@ -230,10 +285,22 @@ impl App {
                 self.connection = Connection::Online;
                 self.sidebar.mark_dirty();
             }
+            Event::Disconnected => {
+                // Before the first READY it's still "connecting".
+                if self.connection == Connection::Online {
+                    self.connection = Connection::Reconnecting;
+                }
+            }
             Event::GuildCreate { .. }
             | Event::GuildDelete { .. }
             | Event::ChannelUpsert(_)
-            | Event::ChannelDelete { .. } => self.sidebar.mark_dirty(),
+            | Event::ChannelDelete { .. }
+            | Event::GuildUpdate { .. }
+            | Event::MemberUpdate { .. }
+            | Event::RoleUpsert { .. }
+            | Event::RoleDelete { .. }
+            | Event::MessageAck { .. }
+            | Event::GuildSettingsUpdate(_) => self.sidebar.mark_dirty(),
             Event::MessageCreate { message, .. } => {
                 // They sent it, so they're not typing any more.
                 if let Some(typers) = self.typing.get_mut(&message.channel_id) {
@@ -255,7 +322,11 @@ impl App {
                     return; // nothing visible changed
                 }
             }
-            Event::MessageUpdate { channel_id, .. } | Event::MessageDelete { channel_id, .. } => {
+            Event::MessageUpdate { channel_id, .. }
+            | Event::MessageDelete { channel_id, .. }
+            | Event::ReactionAdd { channel_id, .. }
+            | Event::ReactionRemove { channel_id, .. }
+            | Event::ReactionClear { channel_id, .. } => {
                 if Some(*channel_id) != self.store.active_channel() {
                     self.store.apply(event);
                     return;
@@ -280,6 +351,13 @@ impl App {
                     Err(error) => self.show_error(format!("Couldn't load messages: {error}")),
                 }
             }
+            TaskResult::Older { channel_id, result } => {
+                self.loading_older = false;
+                match result {
+                    Ok(page) => self.store.insert_older(channel_id, page, usize::from(OLDER_PAGE)),
+                    Err(error) => self.show_error(format!("Couldn't load older messages: {error}")),
+                }
+            }
             TaskResult::Sent { text, result } => match result {
                 // Store it now; the gateway's copy of the same message is ignored.
                 Ok((message, author)) => self.store.apply(Event::MessageCreate { message, author }),
@@ -290,6 +368,27 @@ impl App {
                     }
                 }
             },
+            TaskResult::Edited { text, result } => match result {
+                Ok((message, _)) => self.store.apply(Event::MessageUpdate {
+                    id: message.id,
+                    channel_id: message.channel_id,
+                    content: Some(message.content),
+                }),
+                Err(error) => {
+                    self.show_error(format!("Couldn't edit: {error}"));
+                    if self.input.is_empty() {
+                        self.input.set(text);
+                    }
+                }
+            },
+            TaskResult::Done { action, result } => {
+                if let Err(error) = result {
+                    self.show_error(match error {
+                        RestError::Forbidden => format!("You're not allowed to {action} that"),
+                        error => format!("Couldn't {action}: {error}"),
+                    });
+                }
+            }
         }
         self.dirty = true;
     }
@@ -317,6 +416,8 @@ impl App {
             self.dirty = true;
         }
 
+        self.ack_active(false);
+
         // While idle, check every 2 s and redraw if the shown value (0.1 MB) changed.
         if self.ticks.is_multiple_of(2) && shown_mb(resident_memory_kb()) != shown_mb(self.memory_kb) {
             self.dirty = true;
@@ -342,20 +443,33 @@ impl App {
             self.switcher_key(key);
             return;
         }
+        if let Some(message_id) = self.confirm_delete.take() {
+            if matches!(key.code, KeyCode::Char('y' | 'Y') | KeyCode::Enter) {
+                self.delete_message(message_id);
+            }
+            return;
+        }
 
         let half_page = usize::from(self.messages_height / 2).max(1);
         match key.code {
-            KeyCode::PageUp => self.scroll += half_page,
+            KeyCode::PageUp => {
+                self.scroll += half_page;
+                if self.at_top {
+                    self.load_older();
+                }
+            }
             KeyCode::PageDown => self.scroll = self.scroll.saturating_sub(half_page),
             KeyCode::Tab | KeyCode::BackTab => {
                 self.focus = match self.focus {
                     Focus::Sidebar => Focus::Input,
-                    Focus::Input => Focus::Sidebar,
+                    Focus::Input | Focus::Messages => Focus::Sidebar,
                 };
+                self.selected = None;
             }
             _ => match self.focus {
                 Focus::Sidebar => self.sidebar_key(key),
                 Focus::Input => self.input_key(key),
+                Focus::Messages => self.messages_key(key),
             },
         }
     }
@@ -398,8 +512,11 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
+            KeyCode::Esc if self.compose != Compose::Message => self.cancel_compose(),
             KeyCode::Esc => self.focus = Focus::Sidebar,
-            KeyCode::Enter => self.send(),
+            KeyCode::Enter => self.submit(),
+            // With nothing typed, Up picks a message (to reply, edit, react…).
+            KeyCode::Up if self.input.is_empty() && self.compose == Compose::Message => self.select_newest(),
             KeyCode::Backspace => self.input.backspace(),
             KeyCode::Delete => self.input.delete(),
             KeyCode::Left => self.input.left(),
@@ -414,10 +531,111 @@ impl App {
             KeyCode::Char('w') if ctrl => self.input.delete_word(),
             KeyCode::Char(c) if !ctrl && !alt => {
                 self.input.insert(c);
-                self.notify_typing();
+                if !matches!(self.compose, Compose::React(_)) {
+                    self.notify_typing();
+                }
             }
             _ => {}
         }
+    }
+
+    fn messages_key(&mut self, key: KeyEvent) {
+        let Some(selected) = self.selected_message().map(|m| (m.id, m.author_id)) else {
+            // The message went away (deleted, or the channel changed).
+            self.leave_selection();
+            return;
+        };
+        let (message_id, author_id) = selected;
+        let mine = Some(author_id) == self.store.me().map(|u| u.id);
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
+            KeyCode::Home | KeyCode::Char('g') => {
+                let oldest = self.active_messages().next().map(|m| m.id);
+                self.selected = oldest;
+                self.load_older();
+            }
+            KeyCode::End | KeyCode::Char('G') => self.select_newest(),
+            KeyCode::Esc | KeyCode::Char('i') => self.leave_selection(),
+            KeyCode::Char('r') | KeyCode::Enter => {
+                self.compose = Compose::Reply(message_id);
+                self.leave_selection();
+            }
+            KeyCode::Char('e') if mine => {
+                let content = self.selected_message().map(|m| m.content.clone()).unwrap_or_default();
+                self.compose = Compose::Edit(message_id);
+                self.input.set(content);
+                self.leave_selection();
+            }
+            KeyCode::Char('e') => self.show_error("You can only edit your own messages"),
+            KeyCode::Char('d') | KeyCode::Delete => self.confirm_delete = Some(message_id),
+            KeyCode::Char('+' | 'a') => {
+                self.compose = Compose::React(message_id);
+                self.input.take();
+                self.leave_selection();
+            }
+            KeyCode::Char(digit @ '1'..='9') => {
+                let index = digit as usize - '1' as usize;
+                let emoji = self
+                    .selected_message()
+                    .and_then(|m| m.reactions.get(index))
+                    .map(|r| r.emoji.clone());
+                match emoji {
+                    Some(emoji) => self.toggle_reaction(message_id, emoji),
+                    None => self.show_error(format!("This message has no reaction #{digit}")),
+                }
+            }
+            KeyCode::Char('o') => self.open_link(),
+            _ => {}
+        }
+    }
+
+    // ---- Message selection --------------------------------------------------
+
+    fn active_messages(&self) -> impl DoubleEndedIterator<Item = &Message> {
+        let channel = self.store.active_channel().unwrap_or_default();
+        self.store.messages(channel)
+    }
+
+    pub fn selected_message(&self) -> Option<&Message> {
+        let channel = self.store.active_channel()?;
+        self.store.message(channel, self.selected?)
+    }
+
+    fn select_newest(&mut self) {
+        let Some(newest) = self.active_messages().next_back().map(|m| m.id) else {
+            return;
+        };
+        self.selected = Some(newest);
+        self.focus = Focus::Messages;
+    }
+
+    fn move_selection(&mut self, delta: isize) {
+        let Some(selected) = self.selected else { return };
+        let ids: Vec<Snowflake> = self.active_messages().map(|m| m.id).collect();
+        let Some(index) = ids.iter().position(|&id| id == selected) else {
+            return;
+        };
+        match index.checked_add_signed(delta) {
+            Some(next) if next < ids.len() => self.selected = Some(ids[next]),
+            // Past the newest message: back to typing.
+            Some(_) => self.leave_selection(),
+            // Past the oldest: fetch more.
+            None => self.load_older(),
+        }
+    }
+
+    fn leave_selection(&mut self) {
+        self.selected = None;
+        self.focus = Focus::Input;
+        self.scroll = 0;
+    }
+
+    fn cancel_compose(&mut self) {
+        if matches!(self.compose, Compose::Edit(_) | Compose::React(_)) {
+            self.input.take();
+        }
+        self.compose = Compose::Message;
     }
 
     // ---- Actions ------------------------------------------------------------
@@ -425,8 +643,13 @@ impl App {
     fn open_channel(&mut self, channel_id: Snowflake) {
         self.scroll = 0;
         self.focus = Focus::Input;
+        self.selected = None;
+        self.confirm_delete = None;
+        self.cancel_compose();
+        self.loading_older = false;
         let needs_history = self.store.open_channel(channel_id);
         self.sidebar.reveal_channel(&self.store, channel_id);
+        self.ack_active(true);
 
         if let Some(guild_id) = self.store.channel(channel_id).and_then(|c| c.guild_id) {
             self.gateway.subscribe_channel(guild_id, channel_id);
@@ -447,15 +670,74 @@ impl App {
         });
     }
 
-    fn send(&mut self) {
+    /// Fetches the page before the oldest cached message, if there is one.
+    fn load_older(&mut self) {
+        let Some(channel_id) = self.store.active_channel() else {
+            return;
+        };
+        if self.loading_older || self.loading_history || !self.store.has_older(channel_id) {
+            return;
+        }
+        let Some(oldest) = self.store.messages(channel_id).next().map(|m| m.id) else {
+            return;
+        };
+        self.loading_older = true;
+        let rest = self.rest.clone();
+        let tasks = self.tasks.clone();
+        tokio::spawn(async move {
+            let result = rest.messages_before(channel_id, Some(oldest), OLDER_PAGE).await;
+            let _ = tasks.send(TaskResult::Older { channel_id, result });
+        });
+    }
+
+    /// Tells Discord you've read the open channel (so other devices agree),
+    /// when there's something new. Batched unless `now`.
+    fn ack_active(&mut self, now: bool) {
+        if !self.terminal_focused {
+            return;
+        }
+        if !now && self.last_ack.is_some_and(|at| at.elapsed() < ACK_INTERVAL) {
+            return;
+        }
+        let Some(channel_id) = self.store.active_channel() else {
+            return;
+        };
+        let Some(message_id) = self.store.mark_read(channel_id) else {
+            return;
+        };
+        self.last_ack = Some(Instant::now());
+        self.sidebar.mark_dirty();
+        let rest = self.rest.clone();
+        tokio::spawn(async move {
+            if let Err(error) = rest.ack(channel_id, message_id).await {
+                warn!("read ack failed: {error}");
+            }
+        });
+    }
+
+    /// Enter in the input box: send, reply, save an edit, or react.
+    fn submit(&mut self) {
         let Some(channel_id) = self.store.active_channel() else {
             self.show_error("Open a channel first");
             return;
         };
         let text = self.input.text().trim().to_owned();
-        if text.is_empty() {
+        if let Compose::React(message_id) = self.compose {
+            if !text.is_empty() {
+                let emoji = parse_emoji(&text, self.store.message(channel_id, message_id));
+                self.toggle_reaction(message_id, emoji);
+            }
+            self.input.take();
+            self.compose = Compose::Message;
             return;
         }
+        if text.is_empty() {
+            if let Compose::Edit(_) = self.compose {
+                self.show_error("Empty message: press Esc to cancel, or pick it with ↑ and press d to delete");
+            }
+            return;
+        }
+        let text = plume_markdown::replace_shortcodes(&text);
         let length = text.chars().count();
         if length > MAX_MESSAGE_LENGTH {
             self.show_error(format!("Message is too long ({length}/{MAX_MESSAGE_LENGTH})"));
@@ -465,12 +747,86 @@ impl App {
         self.input.take();
         self.scroll = 0;
         self.last_typing_sent = None;
+        let compose = std::mem::replace(&mut self.compose, Compose::Message);
         let rest = self.rest.clone();
         let tasks = self.tasks.clone();
         tokio::spawn(async move {
-            let result = rest.send_message(channel_id, &text, None).await;
-            let _ = tasks.send(TaskResult::Sent { text, result });
+            let task = match compose {
+                Compose::Edit(message_id) => {
+                    let result = rest.edit_message(channel_id, message_id, &text).await;
+                    TaskResult::Edited { text, result }
+                }
+                Compose::Reply(message_id) => {
+                    let result = rest.send_message(channel_id, &text, Some(message_id)).await;
+                    TaskResult::Sent { text, result }
+                }
+                Compose::Message | Compose::React(_) => {
+                    let result = rest.send_message(channel_id, &text, None).await;
+                    TaskResult::Sent { text, result }
+                }
+            };
+            let _ = tasks.send(task);
         });
+    }
+
+    fn delete_message(&mut self, message_id: Snowflake) {
+        let Some(channel_id) = self.store.active_channel() else {
+            return;
+        };
+        // Move the highlight off the message that's about to disappear.
+        if self.selected == Some(message_id) {
+            self.move_selection(-1);
+            if self.selected == Some(message_id) {
+                self.leave_selection();
+            }
+        }
+        let rest = self.rest.clone();
+        let tasks = self.tasks.clone();
+        tokio::spawn(async move {
+            let result = rest.delete_message(channel_id, message_id).await;
+            let _ = tasks.send(TaskResult::Done {
+                action: "delete",
+                result,
+            });
+        });
+    }
+
+    /// Adds your reaction, or removes it if it's already there.
+    fn toggle_reaction(&mut self, message_id: Snowflake, emoji: Emoji) {
+        let Some(channel_id) = self.store.active_channel() else {
+            return;
+        };
+        let add = !self
+            .store
+            .message(channel_id, message_id)
+            .is_some_and(|m| m.reactions.iter().any(|r| r.emoji == emoji && r.me));
+        let rest = self.rest.clone();
+        let tasks = self.tasks.clone();
+        tokio::spawn(async move {
+            let result = rest.react(channel_id, message_id, &emoji.name, emoji.id, add).await;
+            let _ = tasks.send(TaskResult::Done {
+                action: "react to",
+                result,
+            });
+        });
+    }
+
+    /// Opens the selected message's first link or attachment in the browser.
+    fn open_link(&mut self) {
+        let Some(message) = self.selected_message() else { return };
+        let url = message
+            .attachments
+            .first()
+            .map(|a| a.url.clone())
+            .or_else(|| first_link(&message.content));
+        match url {
+            Some(url) => {
+                if let Err(error) = crate::open::url(&url) {
+                    self.show_error(format!("Couldn't open the link: {error}"));
+                }
+            }
+            None => self.show_error("No link or attachment in that message"),
+        }
     }
 
     /// Tells the channel we're typing, at most once every few seconds.
@@ -516,6 +872,15 @@ impl App {
             [a, b] => Some(format!("{a} and {b} are typing…")),
             _ => Some("Several people are typing…".to_owned()),
         }
+    }
+
+    /// The name of whoever wrote a message in the open channel.
+    pub fn author_name(&self, message_id: Snowflake) -> String {
+        self.store
+            .active_channel()
+            .and_then(|channel| self.store.message(channel, message_id))
+            .and_then(|m| self.store.user(m.author_id))
+            .map_or_else(|| "a message".to_owned(), |u| u.display_name().to_owned())
     }
 
     // ---- Quick switcher -----------------------------------------------------
@@ -618,6 +983,36 @@ fn resident_memory_kb() -> Option<u64> {
     line.split_whitespace().nth(1)?.parse().ok()
 }
 
+/// What the user typed in the react prompt, as an emoji: `:name:` matches a
+/// reaction already on the message (custom ones included) or a known
+/// shortcode; anything else is taken as the emoji itself.
+fn parse_emoji(text: &str, message: Option<&Message>) -> Emoji {
+    if let Some(name) = text.strip_prefix(':').and_then(|t| t.strip_suffix(':')) {
+        if let Some(existing) = message.and_then(|m| m.reactions.iter().find(|r| r.emoji.name == name)) {
+            return existing.emoji.clone();
+        }
+        if let Some(emoji) = plume_markdown::shortcode(name) {
+            return Emoji {
+                name: emoji.to_owned(),
+                id: None,
+            };
+        }
+    }
+    Emoji {
+        name: text.to_owned(),
+        id: None,
+    }
+}
+
+fn first_link(content: &str) -> Option<String> {
+    plume_markdown::flatten(&plume_markdown::parse(content))
+        .into_iter()
+        .find_map(|span| match span.piece {
+            plume_markdown::Piece::Link(url) => Some(url.to_owned()),
+            _ => None,
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -647,6 +1042,7 @@ mod tests {
                 Vec::new()
             },
             last_message_id: None,
+            overwrites: Vec::new(),
         }
     }
 
@@ -662,6 +1058,7 @@ mod tests {
             mentions: Vec::new(),
             mention_everyone: false,
             attachments: Vec::new(),
+            reactions: Vec::new(),
         }
     }
 
@@ -683,6 +1080,7 @@ mod tests {
                 id: Snowflake(10),
                 name: "Rust Hangout".into(),
                 channels: vec![Snowflake(99), Snowflake(100), Snowflake(101)],
+                ..Guild::default()
             }],
             channels: vec![
                 channel(99, Some(10), Some("Text Channels"), ChannelKind::Category, None),
@@ -691,6 +1089,8 @@ mod tests {
                 channel(200, None, None, ChannelKind::Dm, None),
             ],
             users: vec![user(2, "Alice"), user(3, "Bob")],
+            read_states: Vec::new(),
+            settings: Vec::new(),
         });
 
         app.store.open_channel(Snowflake(100));
@@ -716,6 +1116,7 @@ mod tests {
                 ),
                 (with_file, user(2, "Alice")),
                 (ping, user(3, "Bob")),
+                (message(95, 1, "my own words"), user(1, "Me")),
             ],
         );
         app.on_gateway(Event::MessageCreate {
@@ -806,5 +1207,195 @@ mod tests {
         }
         app.toggle_switcher();
         render(&mut app, 10, 4);
+    }
+
+    fn press(app: &mut App, code: KeyCode) {
+        app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    fn selected_content(app: &App) -> &str {
+        app.selected_message().map_or("", |m| m.content.as_str())
+    }
+
+    #[tokio::test]
+    async fn up_from_an_empty_box_picks_messages() {
+        let mut app = demo_app();
+        app.focus = Focus::Input;
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.focus, Focus::Messages);
+        assert_eq!(selected_content(&app), "my own words");
+        press(&mut app, KeyCode::Up);
+        assert!(selected_content(&app).starts_with("hey"));
+        let screen = render(&mut app, 100, 24);
+        assert!(screen.contains("r reply"), "selection hints are shown");
+
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down); // past the newest: back to typing
+        assert_eq!(app.focus, Focus::Input);
+        assert_eq!(app.selected, None);
+    }
+
+    #[tokio::test]
+    async fn reply_edit_and_react_set_up_the_input_box() {
+        let mut app = demo_app();
+        app.focus = Focus::Input;
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Up); // Bob's message
+        press(&mut app, KeyCode::Char('r'));
+        assert!(matches!(app.compose, Compose::Reply(_)));
+        assert_eq!(app.focus, Focus::Input);
+        assert!(render(&mut app, 100, 24).contains("Replying to Bob"));
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.compose, Compose::Message, "Esc cancels the reply first");
+        assert_eq!(app.focus, Focus::Input);
+
+        // Someone else's message can't be edited.
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Char('e'));
+        assert!(app.error.is_some());
+        assert_eq!(app.compose, Compose::Message);
+
+        // Your own can: the box is filled with its text.
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char('e'));
+        assert!(matches!(app.compose, Compose::Edit(_)));
+        assert_eq!(app.input.text(), "my own words");
+        assert!(render(&mut app, 100, 24).contains("Editing your message"));
+        press(&mut app, KeyCode::Esc);
+        assert!(app.input.is_empty(), "cancelling an edit clears the box");
+
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Char('+'));
+        assert!(matches!(app.compose, Compose::React(_)));
+        assert!(render(&mut app, 100, 24).contains("Type an emoji"));
+    }
+
+    #[tokio::test]
+    async fn delete_asks_first() {
+        let mut app = demo_app();
+        app.focus = Focus::Input;
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Char('d'));
+        assert!(app.confirm_delete.is_some());
+        assert!(render(&mut app, 100, 24).contains("Delete Me's message?"));
+        press(&mut app, KeyCode::Char('n'));
+        assert!(app.confirm_delete.is_none());
+        assert_eq!(selected_content(&app), "my own words", "nothing was deleted");
+    }
+
+    #[tokio::test]
+    async fn reactions_show_under_the_message() {
+        let mut app = demo_app();
+        let (channel_id, message_id) = (Snowflake(100), app.store.messages(Snowflake(100)).last().unwrap().id);
+        let emoji = Emoji {
+            name: "🔥".into(),
+            id: None,
+        };
+        for user_id in [2, 3] {
+            app.on_gateway(Event::ReactionAdd {
+                channel_id,
+                message_id,
+                user_id: Snowflake(user_id),
+                emoji: emoji.clone(),
+            });
+        }
+        let screen = render(&mut app, 100, 24);
+        // The test terminal pads wide characters with a space.
+        assert!(
+            screen.lines().any(|line| line.contains("🔥") && line.contains(" 2 ")),
+            "{screen}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hidden_and_muted_channels() {
+        use plume_core::models::{GuildSettings, Overwrite, OverwriteKind, Role};
+        let mut app = demo_app();
+        app.on_gateway(Event::ChannelUpsert(Channel {
+            overwrites: vec![Overwrite {
+                id: Snowflake(10),
+                kind: OverwriteKind::Role,
+                allow: 0,
+                deny: 1 << 10,
+            }],
+            ..channel(102, Some(10), Some("secret-staff"), ChannelKind::Text, Some(99))
+        }));
+        app.on_gateway(Event::RoleUpsert {
+            guild_id: Snowflake(10),
+            role: Role {
+                id: Snowflake(10),
+                permissions: 1 << 10,
+            },
+        });
+        app.on_gateway(Event::MemberUpdate {
+            guild_id: Snowflake(10),
+            user_id: Snowflake(1),
+            roles: vec![],
+        });
+        let screen = render(&mut app, 100, 24);
+        assert!(!screen.contains("secret-staff"));
+        assert!(screen.contains("# general"));
+
+        app.on_gateway(Event::GuildSettingsUpdate(GuildSettings {
+            guild_id: Some(Snowflake(10)),
+            muted: false,
+            muted_channels: vec![Snowflake(101)],
+        }));
+        app.on_gateway(Event::MessageCreate {
+            message: message(200, 3, "noise"),
+            author: user(3, "Bob"),
+        });
+        assert!(app.store.is_muted(Snowflake(101)));
+    }
+
+    #[tokio::test]
+    async fn reconnecting_shows_in_the_status_bar() {
+        let mut app = demo_app();
+        app.on_gateway(Event::Disconnected);
+        assert!(render(&mut app, 100, 24).contains("reconnecting"));
+        app.on_gateway(Event::Resumed);
+        assert!(render(&mut app, 100, 24).contains("online"));
+    }
+
+    #[test]
+    fn react_prompt_understands_shortcodes_and_existing_reactions() {
+        use plume_core::models::Reaction;
+        assert_eq!(
+            parse_emoji(":fire:", None),
+            Emoji {
+                name: "🔥".into(),
+                id: None
+            }
+        );
+        assert_eq!(
+            parse_emoji("🦀", None),
+            Emoji {
+                name: "🦀".into(),
+                id: None
+            }
+        );
+        let custom = Emoji {
+            name: "blob".into(),
+            id: Some(Snowflake(5)),
+        };
+        let message = Message {
+            reactions: vec![Reaction {
+                emoji: custom.clone(),
+                count: 1,
+                me: false,
+            }],
+            ..Message::default()
+        };
+        assert_eq!(parse_emoji(":blob:", Some(&message)), custom);
+    }
+
+    #[test]
+    fn finds_the_first_link() {
+        assert_eq!(
+            first_link("see https://example.com/a, ok").as_deref(),
+            Some("https://example.com/a")
+        );
+        assert_eq!(first_link("`https://in.code`"), None);
     }
 }
