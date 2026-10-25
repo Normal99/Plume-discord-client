@@ -2,7 +2,7 @@
 
 A lightweight, **native** Discord client with selectable weight: 🪶 Feather (5–30 MB), 💬 Standard (50–100 MB), 🧩 Full with voice and plugins (100–250 MB). Same idea as Vesktop — a nicer desktop client — but without Electron or any embedded browser.
 
-**Status:** the 🪶 Feather terminal client (`plume-tui`) works for daily text chat: replies, edits, deletes, reactions, unread state synced with your other devices, and scrollback. GTK, voice and the rest are still planned. See the [roadmap](docs/09-roadmap.md).
+**Status:** the 🪶 Feather terminal client (`plume-tui`) works for daily chat: replies, edits, deletes, reactions, files, threads, unread state synced with your other devices, scrollback, and voice calls (end-to-end encrypted). GTK, video and the rest are still planned. See the [roadmap](docs/09-roadmap.md).
 
 > ⚠️ Third-party clients break Discord's Terms of Service. Use at your own risk. See [10-risks.md](docs/10-risks.md).
 
@@ -15,12 +15,14 @@ logging in: scan the QR code with the Discord app on your phone
 
 - **Windows:** `plume-tui-…-windows-x86_64.zip`. Windows Terminal works best. If SmartScreen warns, choose "More info" → "Run anyway".
 - **macOS:** `…-macos-arm64` for M1 and later, `…-macos-x86_64` for Intel. The build isn't signed, so run `xattr -d com.apple.quarantine plume-tui` once.
-- **Linux:** `…-linux-x86_64`, a static build for any distribution.
+- **Linux:** `…-linux-x86_64-voice` for voice calls (needs ALSA, which every desktop distribution has), or `…-linux-x86_64`, a static text-only build for any distribution.
 
 Want the newest work in progress? Each CI run in the Actions tab has builds too
 (you need to be signed in to GitHub). See [PROGRESS.md](PROGRESS.md) for what's new.
 
 ## Build it yourself
+
+On Linux, voice needs the ALSA headers (`sudo apt install libasound2-dev`, `sudo dnf install alsa-lib-devel`), or build without voice using `--no-default-features`.
 
 ```bash
 cargo build --release -p plume-tui
@@ -40,8 +42,9 @@ read -rs DISCORD_TOKEN && export DISCORD_TOKEN
 | Where | Keys |
 |---|---|
 | Anywhere | `Tab` switch sidebar/input · `Ctrl+K` jump to a channel · `PgUp`/`PgDn` scroll · `Ctrl+C` quit |
-| Sidebar | `↑`/`↓` or `j`/`k` move · `Enter`/`→` open or expand · `←` collapse · `L` show/hide locked channels · `i` start typing |
-| Input | `Enter` send · `/upload <file> [message]` send a file · `↑` (empty box) pick a message · `Esc` back to sidebar (or cancel a reply/edit) · `End` (empty box) jump to newest · `Ctrl+W` delete word · `Ctrl+U` clear |
+| In a call | `Alt+M` mute · `Alt+D` deafen · `Alt+L` leave |
+| Sidebar | `↑`/`↓` or `j`/`k` move · `Enter`/`→` open, expand or join a voice channel · `←` collapse · `L` show/hide locked channels · `i` start typing |
+| Input | `Enter` send · `/upload <file> [message]` send a file · `/call` call this DM · `/leave` hang up · `/volume <name> <0-200>` how loud someone is · `/privacy` show the call's privacy code · `↑` (empty box) pick a message · `Esc` back to sidebar (or cancel a reply/edit) · `End` (empty box) jump to newest · `Ctrl+W` delete word · `Ctrl+U` clear |
 | Picking a message | `↑`/`↓` move (going past the top loads older messages) · `r` reply · `e` edit yours · `d` delete · `+` react · `1`–`9` toggle that reaction · `o` open its link or attachment · `Esc` back |
 
 Type `:fire:`-style shortcodes and they're sent as emoji.
@@ -57,6 +60,8 @@ Settings: run `plume-tui config` to create a settings file, or use options: `--p
 | `plume-rest` | HTTP API with rate limiting: history, sending, typing |
 | `plume-auth` | QR login, token login, keyring storage |
 | `plume-markdown` | Discord's markdown → syntax tree → styled spans |
+| `plume-notify` | Desktop notifications |
+| `plume-voice` | Voice calls: voice gateway, encrypted RTP over UDP, DAVE end-to-end encryption, microphone/speakers |
 | `plume-tui` | 🪶 Feather frontend (ratatui) |
 
 ## Docs

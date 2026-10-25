@@ -10,7 +10,9 @@ Every push builds Plume for Linux, Windows and macOS.
 1. Open the repo's **Actions** tab and click the newest green **CI** run
    (the branch name is shown next to it).
 2. Scroll to **Artifacts** and download the one for your system:
-   `plume-tui-linux-x86_64`, `plume-tui-windows-x86_64` or `plume-tui-macos-arm64`.
+   `plume-tui-windows-x86_64`, `plume-tui-macos-arm64`,
+   `plume-tui-linux-x86_64-voice` (Linux with voice calls) or
+   `plume-tui-linux-x86_64` (Linux, text only, runs anywhere).
 3. Unzip it and log in, then start the client:
 
    ```bash
@@ -25,6 +27,32 @@ Logs go to `~/.local/state/plume/plume-tui.log` (`%LOCALAPPDATA%\plume` on
 Windows). If something breaks, that file is the most useful thing to send.
 
 ## Changelog
+
+### Milestone 7: voice calls (in review)
+
+- **Voice channels in the sidebar:** voice and stage channels (`🔊`) show
+  who's in them underneath, with `●` lit while someone talks and
+  `muted`/`deaf` next to their name. DMs show who's in a call too.
+- **Join and leave:** `Enter` on a voice channel joins it and shows its
+  text chat. In a DM, type `/call` to start a call; the other person's
+  Discord rings. `/leave` (or `Alt+L` from anywhere) hangs up.
+- **Mute and deafen:** `Alt+M` and `Alt+D` from anywhere while in a call.
+  Deafening mutes you too; unmuting undeafens, like Discord. The status bar
+  shows the call, `[muted]`/`[deafened]`, and 🔒 when the call is end-to-end
+  encrypted.
+- **Per-person volume:** `/volume alice 50` makes Alice quieter (0–200%,
+  part of a name is enough). It's shown next to their name and kept for
+  later calls while Plume is open.
+- **End-to-end encryption (DAVE):** calls use Discord's new end-to-end
+  encryption when everyone supports it. `/privacy` shows the call's privacy
+  code, which matches what the official app shows for the same call.
+- **Light on resources:** nothing voice-related runs until you join a call.
+  Audio is Opus at 64 kbps with a voice gate, so silence isn't sent.
+  Reconnects on its own if the voice server drops.
+- **Linux:** voice needs the system sound library (ALSA, already on every
+  desktop Linux), so there are now two Linux downloads: `linux-x86_64-voice`
+  and the static text-only `linux-x86_64`.
+- Video and screen sharing are not in the terminal client.
 
 ### Milestone 6: ready to share (in review)
 

@@ -12,8 +12,9 @@ Build `plume-tui` against the M1 core. Add the READY stream filter. Measure RSS 
 ## M2 — Daily driver (text)
 Send/edit/delete, replies, the full markdown renderer, embeds, attachments (view + upload), reactions, emoji picker, typing indicators, unread/mention state + ack, notifications, DMs and group DMs, threads, quick switcher, settings page.
 
-## M3 — Voice (works in the TUI too)
+## M3 — Voice (works in the TUI too) ✅ in the TUI (push-to-talk waits for a GUI)
 Join/leave a voice channel and DM calls, audio in/out, DAVE, mute/deafen, push-to-talk, per-user volume.
+- **Done in `plume-tui`:** voice and DM calls (ringing included), DAVE with the privacy code, mute/deafen, per-user volume, a voice gate instead of push-to-talk. Terminals don't report key releases (except a few with the kitty keyboard protocol), so push-to-talk comes with the GUI.
 - **Pieces:** voice gateway (WebSocket) → UDP with IP discovery → RTP with transport encryption (`aead_aes256_gcm_rtpsize`) → **DAVE** (Discord's MLS-based end-to-end encryption, required for calls) → Opus encode/decode → `cpal` for microphone and speakers.
 - **DAVE** is the risky part: reuse an existing open-source Rust implementation instead of writing MLS ourselves, and test it against recorded handshakes.
 - **Behind the `voice` cargo feature**, so Feather builds without it stay small. Budget: +5–15 MB RSS while in a call, ~0% CPU when not.

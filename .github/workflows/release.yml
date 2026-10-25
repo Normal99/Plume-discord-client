@@ -35,6 +35,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - run: cargo test --workspace --locked
 
   build:
@@ -44,10 +45,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Static (musl), so it runs on any Linux distribution.
+          # Static (musl), so it runs on any Linux distribution. No voice:
+          # audio needs the system's ALSA library.
           - name: linux-x86_64
             os: ubuntu-latest
             target: x86_64-unknown-linux-musl
+            flags: --no-default-features
+          # With voice. Built on an older Ubuntu so it runs on older glibc.
+          - name: linux-x86_64-voice
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
           - name: windows-x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -68,7 +75,9 @@ jobs:
           key: release-${{ matrix.target }}
       - if: contains(matrix.target, 'musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - run: cargo build --release --locked -p plume-tui --target ${{ matrix.target }}
+      - if: contains(matrix.target, 'linux-gnu')
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - run: cargo build --release --locked -p plume-tui --target ${{ matrix.target }} ${{ matrix.flags }}
       - name: Package
         shell: bash
         run: |
@@ -114,7 +123,8 @@ jobs:
             | Windows | `…-windows-x86_64.zip` |
             | macOS (Apple Silicon, M1 and later) | `…-macos-arm64.tar.gz` |
             | macOS (Intel) | `…-macos-x86_64.tar.gz` |
-            | Linux (any distribution) | `…-linux-x86_64.tar.gz` |
+            | Linux, with voice calls (Ubuntu 22.04+, Fedora 36+, etc.) | `…-linux-x86_64-voice.tar.gz` |
+            | Linux, text only (any distribution) | `…-linux-x86_64.tar.gz` |
 
             Unpack it, open a terminal in that folder, run `plume-tui login` and scan the QR code with the Discord app on your phone (Settings → Scan QR Code). Then run `plume-tui`.
 
