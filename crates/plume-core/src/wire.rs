@@ -10,7 +10,7 @@ use serde::Deserialize;
 use crate::Snowflake;
 use crate::models::{
     Attachment, Channel, ChannelKind, Embed, Emoji, Guild, GuildSettings, Message, Overwrite, OverwriteKind, Reaction,
-    ReadState, Role, User,
+    ReadState, Role, User, VoiceState,
 };
 
 /// Permission bitfields come as strings ("1071698660929") because they
@@ -201,6 +201,9 @@ pub struct WireGuild {
     /// Active threads you can see.
     #[serde(default)]
     pub threads: Vec<WireChannel>,
+    /// Who's in this server's voice channels (no `guild_id` on each).
+    #[serde(default)]
+    pub voice_states: Vec<WireVoiceState>,
     #[serde(default)]
     pub roles: Vec<WireRole>,
     /// A few members (usually including you) in GUILD_CREATE.
@@ -217,6 +220,15 @@ pub struct WireGuildProperties {
 }
 
 impl WireGuild {
+    /// Takes out the voice states, so [`Self::into_models`] stays cheap.
+    pub fn take_voice_states(&mut self) -> Vec<VoiceState> {
+        let id = self.id;
+        std::mem::take(&mut self.voice_states)
+            .into_iter()
+            .filter_map(|v| v.into_model(Some(id)).ok())
+            .collect()
+    }
+
     /// The guild and its channels. Your roles are filled in if `me` is
     /// among the members it carried.
     pub fn into_models(self, me: Option<Snowflake>) -> (Guild, Vec<Channel>) {
@@ -407,6 +419,55 @@ impl<T> WireList<T> {
     pub fn into_vec(self) -> Vec<T> {
         match self {
             WireList::Versioned { entries } | WireList::Bare(entries) => entries,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WireVoiceState {
+    #[serde(default)]
+    pub guild_id: Option<Snowflake>,
+    #[serde(default)]
+    pub channel_id: Option<Snowflake>,
+    #[serde(default)]
+    pub user_id: Option<Snowflake>,
+    /// Some payloads only carry the member.
+    #[serde(default)]
+    pub member: Option<WireMember>,
+    #[serde(default)]
+    pub session_id: String,
+    #[serde(default)]
+    pub self_mute: bool,
+    #[serde(default)]
+    pub self_deaf: bool,
+    #[serde(default)]
+    pub mute: bool,
+    #[serde(default)]
+    pub deaf: bool,
+}
+
+impl WireVoiceState {
+    /// `Ok` for someone in a channel, `Err` (with the state, minus the
+    /// channel) for someone who left. `None` user IDs can't be placed and
+    /// come back as `Err` too.
+    pub fn into_model(self, guild_id: Option<Snowflake>) -> Result<VoiceState, VoiceState> {
+        let user_id = self
+            .user_id
+            .or_else(|| self.member.as_ref().and_then(WireMember::user_id));
+        let state = VoiceState {
+            guild_id: self.guild_id.or(guild_id),
+            channel_id: self.channel_id.unwrap_or_default(),
+            user_id: user_id.unwrap_or_default(),
+            session_id: self.session_id,
+            self_mute: self.self_mute,
+            self_deaf: self.self_deaf,
+            mute: self.mute,
+            deaf: self.deaf,
+        };
+        if self.channel_id.is_some() && user_id.is_some() {
+            Ok(state)
+        } else {
+            Err(state)
         }
     }
 }

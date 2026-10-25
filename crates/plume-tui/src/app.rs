@@ -330,7 +330,9 @@ impl App {
             | Event::RoleDelete { .. }
             | Event::MessageAck { .. }
             | Event::GuildSettingsUpdate(_)
-            | Event::ThreadsSync { .. } => self.sidebar.mark_dirty(),
+            | Event::ThreadsSync { .. }
+            | Event::VoiceStateUpdate { .. } => self.sidebar.mark_dirty(),
+            Event::VoiceServerUpdate { .. } => return,
             Event::MessageCreate { message, author } => {
                 self.maybe_notify(message, author);
                 // They sent it, so they're not typing any more.
@@ -1266,6 +1268,7 @@ mod tests {
             users: vec![user(2, "Alice"), user(3, "Bob")],
             read_states: Vec::new(),
             settings: Vec::new(),
+            voice_states: Vec::new(),
         }
     }
 

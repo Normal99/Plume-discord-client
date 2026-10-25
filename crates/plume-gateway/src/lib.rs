@@ -13,5 +13,5 @@ mod heartbeat;
 pub mod opcodes;
 pub mod resume;
 
-pub use connection::{Gateway, GatewayHandle};
+pub use connection::{Gateway, GatewayHandle, VoiceRequest};
 pub use error::GatewayError;

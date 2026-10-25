@@ -197,3 +197,29 @@ pub struct GuildSettings {
     /// Channels (or categories) muted on their own.
     pub muted_channels: Vec<Snowflake>,
 }
+
+/// Someone in a voice channel or call.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VoiceState {
+    /// `None` for DM and group calls.
+    pub guild_id: Option<Snowflake>,
+    pub channel_id: Snowflake,
+    pub user_id: Snowflake,
+    /// Needed to connect to the voice server (only meaningful for you).
+    pub session_id: String,
+    pub self_mute: bool,
+    pub self_deaf: bool,
+    /// Muted or deafened by a moderator.
+    pub mute: bool,
+    pub deaf: bool,
+}
+
+impl VoiceState {
+    pub fn is_muted(&self) -> bool {
+        self.self_mute || self.mute || self.is_deafened()
+    }
+
+    pub fn is_deafened(&self) -> bool {
+        self.self_deaf || self.deaf
+    }
+}
