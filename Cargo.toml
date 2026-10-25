@@ -7,6 +7,7 @@ members = [
     "crates/plume-markdown",
     "crates/plume-auth",
     "crates/plume-notify",
+    "crates/plume-voice",
     "crates/plume-tui",
 ]
 
