@@ -346,6 +346,9 @@ fn voice_member_row(
         Some(state) if state.is_muted() => spans.push(Span::styled(" muted", DIM)),
         _ => {}
     }
+    if let Some(volume) = app.voice.volumes.get(&user_id) {
+        spans.push(Span::styled(format!(" {:.0}%", volume * 100.0), DIM));
+    }
     Line::from(spans)
 }
 

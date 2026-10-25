@@ -39,13 +39,19 @@ pub enum Route {
         message_id: Snowflake,
         emoji: String,
     },
+    /// Rings the other people in a DM call.
+    RingCall {
+        channel_id: Snowflake,
+    },
 }
 
 impl Route {
     pub fn method(&self) -> Method {
         match self {
             Route::CurrentUser | Route::GetMessages { .. } => Method::GET,
-            Route::CreateMessage { .. } | Route::TriggerTyping { .. } | Route::Ack { .. } => Method::POST,
+            Route::CreateMessage { .. } | Route::TriggerTyping { .. } | Route::Ack { .. } | Route::RingCall { .. } => {
+                Method::POST
+            }
             Route::EditMessage { .. } => Method::PATCH,
             Route::AddReaction { .. } => Method::PUT,
             Route::DeleteMessage { .. } | Route::RemoveReaction { .. } => Method::DELETE,
@@ -62,6 +68,7 @@ impl Route {
                 format!("/channels/{channel_id}/messages/{message_id}")
             }
             Route::TriggerTyping { channel_id } => format!("/channels/{channel_id}/typing"),
+            Route::RingCall { channel_id } => format!("/channels/{channel_id}/call/ring"),
             Route::Ack { channel_id, message_id } => format!("/channels/{channel_id}/messages/{message_id}/ack"),
             Route::AddReaction {
                 channel_id,
@@ -87,6 +94,7 @@ impl Route {
             Route::EditMessage { channel_id, .. } => format!("PATCH /channels/{channel_id}/messages/:id"),
             Route::DeleteMessage { channel_id, .. } => format!("DELETE /channels/{channel_id}/messages/:id"),
             Route::TriggerTyping { channel_id } => format!("POST /channels/{channel_id}/typing"),
+            Route::RingCall { channel_id } => format!("POST /channels/{channel_id}/call/ring"),
             Route::Ack { channel_id, .. } => format!("POST /channels/{channel_id}/messages/:id/ack"),
             Route::AddReaction { channel_id, .. } | Route::RemoveReaction { channel_id, .. } => {
                 format!("/channels/{channel_id}/messages/:id/reactions")

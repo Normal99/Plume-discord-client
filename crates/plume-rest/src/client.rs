@@ -209,6 +209,14 @@ impl RestClient {
         Ok(())
     }
 
+    /// Rings everyone else in a DM call you've started.
+    pub async fn ring(&self, channel_id: Snowflake) -> Result<(), RestError> {
+        let body = json!({ "recipients": null });
+        self.send(Route::RingCall { channel_id }, "", Some(Body::Json(body)))
+            .await?;
+        Ok(())
+    }
+
     async fn request<T: DeserializeOwned>(
         &self,
         route: Route,

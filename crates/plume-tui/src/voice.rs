@@ -4,7 +4,7 @@
 //! Without the `voice` feature this still tracks what you asked for, so
 //! the UI can say the build has no voice instead of silently doing nothing.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use plume_core::{Event, Snowflake, Store};
 use plume_gateway::{GatewayHandle, VoiceRequest};
@@ -47,6 +47,8 @@ pub struct Call {
     /// Who's talking right now.
     pub speaking: HashSet<Snowflake>,
     pub privacy_code: Option<String>,
+    /// Ring the others once Discord has us in the call (a DM call we started).
+    ring: bool,
     session_id: Option<String>,
     server: Option<(String, String)>,
     #[cfg(feature = "voice")]
@@ -59,6 +61,8 @@ pub struct Voice {
     pub call: Option<Call>,
     pub muted: bool,
     pub deafened: bool,
+    /// Per-person volume (1.0 = normal), kept across calls.
+    pub volumes: HashMap<Snowflake, f32>,
     #[allow(dead_code)]
     events: mpsc::Sender<VoiceEvent>,
 }
@@ -69,6 +73,7 @@ pub fn new() -> (Voice, VoiceEvents) {
         call: None,
         muted: false,
         deafened: false,
+        volumes: HashMap::new(),
         events,
     };
     (voice, VoiceEvents(receiver))
@@ -87,6 +92,8 @@ impl Voice {
             return Ok(());
         }
         let guild_id = store.channel(channel_id).and_then(|c| c.guild_id);
+        let me = store.me().map(|u| u.id);
+        let ring = guild_id.is_none() && store.voice_members(channel_id).iter().all(|v| Some(v.user_id) == me);
         self.disconnect_media();
         self.call = Some(Call {
             guild_id,
@@ -94,6 +101,7 @@ impl Voice {
             status: Status::Joining,
             speaking: HashSet::new(),
             privacy_code: None,
+            ring,
             session_id: None,
             server: None,
             #[cfg(feature = "voice")]
@@ -130,6 +138,30 @@ impl Voice {
         self.deafened = !self.deafened;
         self.muted = self.deafened || self.muted;
         self.apply_switches(gateway);
+    }
+
+    /// Sets how loud someone is, from 0.0 (silent) to 2.0 (double).
+    pub fn set_volume(&mut self, user_id: Snowflake, volume: f32) {
+        let volume = volume.clamp(0.0, 2.0);
+        if volume == 1.0 {
+            self.volumes.remove(&user_id);
+        } else {
+            self.volumes.insert(user_id, volume);
+        }
+        #[cfg(feature = "voice")]
+        if let Some(audio) = self.call.as_ref().and_then(|c| c.audio.as_ref()) {
+            audio.set_volume(user_id, volume);
+        }
+    }
+
+    /// The DM to ring, once: after Discord confirms we started the call.
+    pub fn take_ring(&mut self) -> Option<Snowflake> {
+        let call = self.call.as_mut()?;
+        if !call.ring || call.session_id.is_none() {
+            return None;
+        }
+        call.ring = false;
+        Some(call.channel_id)
     }
 
     /// Picks our session and the voice server out of gateway events.
@@ -255,6 +287,9 @@ impl Voice {
             Ok(audio) => {
                 audio.set_muted(self.muted);
                 audio.set_deafened(self.deafened);
+                for (&user_id, &volume) in &self.volumes {
+                    audio.set_volume(user_id, volume);
+                }
                 let message = (!audio.has_microphone).then(|| "No microphone found: you can listen only".to_owned());
                 call.audio = Some(audio);
                 message

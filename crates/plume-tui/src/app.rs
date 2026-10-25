@@ -333,6 +333,14 @@ impl App {
                 self.show_error(message);
                 self.dirty = true;
             }
+            if let Some(channel_id) = self.voice.take_ring() {
+                let rest = self.rest.clone();
+                let tasks = self.tasks.clone();
+                tokio::spawn(async move {
+                    let result = rest.ring(channel_id).await;
+                    let _ = tasks.send(TaskResult::Done { action: "ring", result });
+                });
+            }
         }
         match &event {
             Event::Ready { .. } => {
@@ -891,6 +899,19 @@ impl App {
             }
             _ => {}
         }
+        if let Some(args) = text.strip_prefix("/volume")
+            && (args.is_empty() || args.starts_with(' '))
+        {
+            match self.set_volume(args.trim()) {
+                Ok(message) => {
+                    self.input.take();
+                    self.sidebar.mark_dirty();
+                    self.show_error(message);
+                }
+                Err(error) => self.show_error(error),
+            }
+            return;
+        }
         if let Some(upload) = crate::upload::parse(&text) {
             self.upload(channel_id, text.clone(), upload);
             return;
@@ -931,6 +952,35 @@ impl App {
             };
             let _ = tasks.send(task);
         });
+    }
+
+    /// `/volume <name> <0-200>`: how loud someone in the call is.
+    fn set_volume(&mut self, args: &str) -> Result<String, String> {
+        const USAGE: &str = "Usage: /volume <name> <0-200>, e.g. /volume alice 50";
+        let (name, percent) = args.rsplit_once(' ').ok_or(USAGE)?;
+        let percent: f32 = percent.trim_end_matches('%').parse().map_err(|_| USAGE)?;
+        if !(0.0..=200.0).contains(&percent) {
+            return Err(USAGE.into());
+        }
+        let call = self.voice.call.as_ref().ok_or("You're not in a call")?;
+        let name = name.trim().trim_start_matches('@').to_lowercase();
+        let me = self.store.me().map(|u| u.id);
+        let people: Vec<&User> = self
+            .store
+            .voice_members(call.channel_id)
+            .iter()
+            .filter(|v| Some(v.user_id) != me)
+            .filter_map(|v| self.store.user(v.user_id))
+            .collect();
+        let named = |u: &&User| [u.display_name(), u.username.as_str()].map(str::to_lowercase);
+        let user = people
+            .iter()
+            .find(|u| named(u).contains(&name))
+            .or_else(|| people.iter().find(|u| named(u).iter().any(|n| n.starts_with(&name))))
+            .ok_or_else(|| format!("No one called \"{name}\" in this call"))?;
+        let (id, shown) = (user.id, user.display_name().to_owned());
+        self.voice.set_volume(id, percent / 100.0);
+        Ok(format!("{shown}: {percent:.0}% volume"))
     }
 
     fn join_voice(&mut self, channel_id: Snowflake) {
@@ -1773,6 +1823,20 @@ mod tests {
             Some(voice::Status::Connecting)
         );
 
+        // Per-person volume, by (part of) their name.
+        app.input.set("/volume ali 50%".into());
+        app.submit();
+        assert_eq!(app.voice.volumes.get(&Snowflake(2)), Some(&0.5));
+        assert!(render(&mut app, 100, 30).contains("Alice 50%"));
+        for bad in ["/volume ali", "/volume ali 300", "/volume nobody 50"] {
+            app.input.set(bad.into());
+            app.submit();
+            assert_eq!(app.input.text(), bad, "kept so it can be fixed");
+        }
+        app.input.set("/volume Alice 100".into());
+        app.submit();
+        assert!(app.voice.volumes.is_empty(), "100% is the default");
+
         // Mute, deafen and leave from anywhere.
         let alt = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT);
         app.on_key(alt('m'));
@@ -1802,6 +1866,32 @@ mod tests {
             app.voice.call.as_ref().map(|c| (c.channel_id, c.guild_id)),
             Some((Snowflake(200), None))
         );
+
+        // Starting a DM call rings the others once Discord has us in it.
+        assert_eq!(app.voice.take_ring(), None, "not before Discord confirms");
+        let joined = Event::VoiceStateUpdate {
+            state: VoiceState {
+                guild_id: None,
+                channel_id: Snowflake(200),
+                ..in_voice(1)
+            },
+            left: false,
+        };
+        app.voice.on_gateway(&joined, Some(Snowflake(1)), &app.gateway);
+        assert_eq!(app.voice.take_ring(), Some(Snowflake(200)));
+        assert_eq!(app.voice.take_ring(), None, "only once");
+        // Guild voice channels never ring.
+        app.voice.leave(&app.gateway);
+        app.activate(Entry::Channel(Snowflake(150)));
+        app.voice.on_gateway(
+            &Event::VoiceStateUpdate {
+                state: in_voice(1),
+                left: false,
+            },
+            Some(Snowflake(1)),
+            &app.gateway,
+        );
+        assert_eq!(app.voice.take_ring(), None);
     }
 
     #[tokio::test]
