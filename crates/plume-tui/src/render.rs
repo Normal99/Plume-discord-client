@@ -1,5 +1,5 @@
-use plume_core::Store;
 use plume_core::models::ChannelKind;
+use plume_core::{Snowflake, Store};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -10,6 +10,7 @@ use crate::app::{App, Compose, Connection, Focus, ViewKey};
 use crate::layout::{self, Areas};
 use crate::sidebar::{self, Entry};
 use crate::text;
+use crate::voice;
 
 const DIM: Style = Style::new().fg(Color::DarkGray);
 const WARNING: Style = Style::new().fg(Color::White).bg(Color::Red);
@@ -106,6 +107,16 @@ fn sidebar_row(
                 // Same width as "# ": the lock is two columns wide.
                 return Line::styled(text::truncate(&format!("{}🔒 {name}", &indent[1..]), width), DIM);
             }
+            if matches!(kind, Some(ChannelKind::Voice | ChannelKind::Stage)) {
+                let in_call = app.voice.call.as_ref().is_some_and(|c| c.channel_id == id);
+                let style = if in_call {
+                    Style::new().fg(Color::Green).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::new().fg(Color::Gray)
+                };
+                // Same width as "    # ": the speaker is two columns wide.
+                return Line::styled(text::truncate(&format!("   🔊 {name}"), width), style);
+            }
             let icon = match kind {
                 Some(ChannelKind::Thread) => '↳',
                 Some(ChannelKind::Forum) => '▤',
@@ -118,6 +129,7 @@ fn sidebar_row(
             };
             (format!("{indent}{icon} {name}"), store.unread(id), base)
         }
+        Entry::VoiceMember(channel_id, user_id) => return voice_member_row(store, app, channel_id, user_id, width),
     };
 
     let is_active = matches!(entry, Entry::Dm(id) | Entry::Channel(id) if Some(id) == active);
@@ -300,6 +312,43 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+/// Someone in a voice channel: lit up while they talk, with mute marks.
+fn voice_member_row(
+    store: &Store,
+    app: &App,
+    channel_id: Snowflake,
+    user_id: Snowflake,
+    width: usize,
+) -> Line<'static> {
+    let name = store.user(user_id).map_or("someone", |u| u.display_name());
+    let state = store
+        .voice_members(channel_id)
+        .into_iter()
+        .find(|v| v.user_id == user_id);
+    let me = store.me().is_some_and(|u| u.id == user_id);
+    let talking = app.voice.call.as_ref().is_some_and(|c| c.channel_id == channel_id)
+        && if me {
+            app.voice.talking()
+        } else {
+            app.voice.call.as_ref().is_some_and(|c| c.speaking.contains(&user_id))
+        };
+    let (dot, style) = if talking {
+        ("●", Style::new().fg(Color::Green).add_modifier(Modifier::BOLD))
+    } else {
+        ("○", Style::new().fg(Color::Gray))
+    };
+    let mut spans = vec![Span::styled(
+        text::truncate(&format!("      {dot} {name}"), width.saturating_sub(6)),
+        style,
+    )];
+    match state {
+        Some(state) if state.is_deafened() => spans.push(Span::styled(" deaf", DIM)),
+        Some(state) if state.is_muted() => spans.push(Span::styled(" muted", DIM)),
+        _ => {}
+    }
+    Line::from(spans)
+}
+
 fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     let (state, color) = match app.connection {
         Connection::Connecting => ("connecting…", Color::Yellow),
@@ -310,11 +359,29 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     if let Some(me) = app.store.me() {
         left.push(Span::styled(format!(" as {}", me.display_name()), DIM));
     }
+    if let Some(call) = &app.voice.call {
+        let (state, color) = match call.status {
+            voice::Status::Joining => ("joining…", Color::Yellow),
+            voice::Status::Connecting => ("connecting…", Color::Yellow),
+            voice::Status::Connected { encrypted: true } => ("in call 🔒", Color::Green),
+            voice::Status::Connected { encrypted: false } => ("in call", Color::Green),
+        };
+        let place = sidebar::channel_label(&app.store, call.channel_id);
+        left.push(Span::styled(format!("  🔊 {place} {state}"), Style::new().fg(color)));
+        if app.voice.deafened {
+            left.push(Span::styled(" [deafened]", Style::new().fg(Color::Red)));
+        } else if app.voice.muted {
+            left.push(Span::styled(" [muted]", Style::new().fg(Color::Red)));
+        }
+    }
 
     let middle = match &app.error {
         Some((error, _)) => Span::styled(format!("  {error}"), Style::new().fg(Color::Red)),
         None => Span::styled(
             match app.focus {
+                Focus::Sidebar if app.voice.call.is_some() => {
+                    "  Alt+M mute · Alt+D deafen · Alt+L leave call · Enter open · Ctrl+K jump"
+                }
                 Focus::Sidebar => "  ↑↓ move · Enter open · L locked channels · Tab type · Ctrl+K jump · Ctrl+C quit",
                 Focus::Input => {
                     "  Enter send · /upload <file> · ↑ pick a message · Esc sidebar · PgUp/PgDn scroll · Ctrl+K jump"

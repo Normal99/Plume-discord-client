@@ -14,8 +14,10 @@ mod login;
 mod open;
 mod render;
 mod sidebar;
+mod stderr;
 mod text;
 mod upload;
+mod voice;
 
 use std::path::PathBuf;
 
@@ -167,7 +169,7 @@ fn init_logging() {
 
 /// `$XDG_STATE_HOME/plume`, falling back to `~/.local/state/plume`
 /// (`%LOCALAPPDATA%\plume` on Windows).
-fn state_dir() -> Option<PathBuf> {
+pub(crate) fn state_dir() -> Option<PathBuf> {
     if cfg!(windows) {
         return Some(PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("plume"));
     }

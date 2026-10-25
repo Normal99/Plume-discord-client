@@ -21,6 +21,7 @@ use crate::input::Input;
 use crate::render;
 use crate::sidebar::{self, Entry, Sidebar};
 use crate::text;
+use crate::voice::{self, Voice, VoiceEvent, VoiceEvents};
 
 /// Discord's limit for one message (without Nitro).
 const MAX_MESSAGE_LENGTH: usize = 2000;
@@ -113,6 +114,9 @@ enum TaskResult {
 /// from the scroll position and a few measurements.
 pub struct App {
     pub store: Store,
+    pub voice: Voice,
+    /// Taken by [`run`] to listen for voice events.
+    voice_events: Option<VoiceEvents>,
     pub sidebar: Sidebar,
     pub sidebar_state: ListState,
     pub focus: Focus,
@@ -170,9 +174,11 @@ pub async fn run(token: Token, options: Options) -> Result<(), Box<dyn Error>> {
 
     // From here on the terminal is ours; `ratatui::restore` must always run.
     let mut terminal = ratatui::init();
+    let _stderr = crate::stderr::Redirect::to_log();
     let _ = crossterm::execute!(stdout(), EnableBracketedPaste, EnableFocusChange);
     let mut terminal_events = EventStream::new();
     let mut ticker = tokio::time::interval(Duration::from_secs(1));
+    let mut voice_events = app.voice_events.take().expect("set in App::new");
 
     let result: Result<(), Box<dyn Error>> = loop {
         if app.dirty {
@@ -192,6 +198,7 @@ pub async fn run(token: Token, options: Options) -> Result<(), Box<dyn Error>> {
             },
             Some(event) = gateway_events.recv() => app.on_gateway(event),
             Some(result) = task_results.recv() => app.on_task(result),
+            Some(event) = voice_events.recv() => app.on_voice(event),
             _ = ticker.tick() => app.on_tick(),
             finished = &mut gateway_task => break match finished {
                 Ok(Ok(())) => Ok(()),
@@ -220,8 +227,11 @@ impl App {
         tasks: mpsc::UnboundedSender<TaskResult>,
         options: &Options,
     ) -> Self {
+        let (voice, voice_events) = voice::new();
         App {
             store: Store::new(options.profile),
+            voice,
+            voice_events: Some(voice_events),
             sidebar: {
                 let mut sidebar = Sidebar::default();
                 sidebar.set_show_locked(options.show_locked);
@@ -293,7 +303,37 @@ impl App {
         self.dirty = true;
     }
 
+    fn on_voice(&mut self, event: VoiceEvent) {
+        // Audio frames arrive 50 times a second per speaker; only redraw
+        // for things that show.
+        #[cfg(feature = "voice")]
+        let redraw = !matches!(event, VoiceEvent::Audio { .. });
+        #[cfg(not(feature = "voice"))]
+        let redraw = false;
+        if let Some(message) = self.voice.on_voice(event, &self.gateway) {
+            self.show_error(message);
+        }
+        if redraw {
+            self.sidebar.mark_dirty();
+            self.dirty = true;
+        }
+    }
+
     fn on_gateway(&mut self, event: Event) {
+        if matches!(
+            event,
+            Event::VoiceStateUpdate { .. } | Event::VoiceServerUpdate { .. } | Event::Ready { .. }
+        ) {
+            let me = self.store.me().map(|u| u.id);
+            let me = me.or(match &event {
+                Event::Ready { me, .. } => Some(me.id),
+                _ => None,
+            });
+            if let Some(message) = self.voice.on_gateway(&event, me, &self.gateway) {
+                self.show_error(message);
+                self.dirty = true;
+            }
+        }
         match &event {
             Event::Ready { .. } => {
                 self.connection = Connection::Online;
@@ -481,6 +521,7 @@ impl App {
 
     fn on_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
             KeyCode::Char('c' | 'q') if ctrl => {
                 self.quit = true;
@@ -488,6 +529,19 @@ impl App {
             }
             KeyCode::Char('k') if ctrl => {
                 self.toggle_switcher();
+                return;
+            }
+            KeyCode::Char('m' | 'M') if alt && self.voice.call.is_some() => {
+                self.voice.toggle_mute(&self.gateway);
+                return;
+            }
+            KeyCode::Char('d' | 'D') if alt && self.voice.call.is_some() => {
+                self.voice.toggle_deafen(&self.gateway);
+                return;
+            }
+            KeyCode::Char('l' | 'L') if alt && self.voice.call.is_some() => {
+                self.voice.leave(&self.gateway);
+                self.sidebar.mark_dirty();
                 return;
             }
             _ => {}
@@ -568,8 +622,18 @@ impl App {
             Entry::Channel(id) if self.store.channel(id).is_some_and(|c| c.kind == ChannelKind::Forum) => {
                 self.show_error("Forums are made of posts: pick one below it");
             }
+            Entry::Channel(id)
+                if self
+                    .store
+                    .channel(id)
+                    .is_some_and(|c| matches!(c.kind, ChannelKind::Voice | ChannelKind::Stage)) =>
+            {
+                // Join the call, and show the channel's text chat meanwhile.
+                self.join_voice(id);
+                self.open_channel(id);
+            }
             Entry::Dm(id) | Entry::Channel(id) => self.open_channel(id),
-            Entry::ServerHeader | Entry::Category(_) => {}
+            Entry::ServerHeader | Entry::Category(_) | Entry::VoiceMember(..) => {}
         }
     }
 
@@ -804,6 +868,29 @@ impl App {
             self.compose = Compose::Message;
             return;
         }
+        match text.as_str() {
+            "/call" | "/join" => {
+                self.input.take();
+                self.join_voice(channel_id);
+                return;
+            }
+            "/privacy" => {
+                self.input.take();
+                let code = self.voice.call.as_ref().and_then(|c| c.privacy_code.clone());
+                self.show_error(match code {
+                    Some(code) => format!("Call privacy code: {code} (everyone in the call sees the same code)"),
+                    None => "No end-to-end encrypted call right now".to_owned(),
+                });
+                return;
+            }
+            "/leave" | "/hangup" => {
+                self.input.take();
+                self.voice.leave(&self.gateway);
+                self.sidebar.mark_dirty();
+                return;
+            }
+            _ => {}
+        }
         if let Some(upload) = crate::upload::parse(&text) {
             self.upload(channel_id, text.clone(), upload);
             return;
@@ -844,6 +931,20 @@ impl App {
             };
             let _ = tasks.send(task);
         });
+    }
+
+    fn join_voice(&mut self, channel_id: Snowflake) {
+        let callable = self
+            .store
+            .channel(channel_id)
+            .is_some_and(|c| matches!(c.kind, ChannelKind::Voice | ChannelKind::Stage) || c.kind.is_private());
+        if !callable {
+            return self.show_error("Calls work in voice channels and DMs");
+        }
+        match self.voice.join(&self.gateway, &self.store, channel_id) {
+            Ok(()) => self.sidebar.mark_dirty(),
+            Err(error) => self.show_error(error),
+        }
     }
 
     fn upload(
@@ -1614,6 +1715,93 @@ mod tests {
         // Archived (deleted) threads drop out.
         app.on_gateway(Event::ChannelDelete { id: Snowflake(501) });
         assert!(!render(&mut app, 100, 24).contains("busy-thread"));
+    }
+
+    #[tokio::test]
+    async fn voice_channels_members_and_joining() {
+        use plume_core::models::VoiceState;
+        let mut app = demo_app();
+        app.on_gateway(Event::ChannelUpsert(channel(
+            150,
+            Some(10),
+            Some("Lounge"),
+            ChannelKind::Voice,
+            Some(99),
+        )));
+        let in_voice = |user: u64| VoiceState {
+            guild_id: Some(Snowflake(10)),
+            channel_id: Snowflake(150),
+            user_id: Snowflake(user),
+            session_id: format!("session-{user}"),
+            self_mute: user == 3,
+            ..VoiceState::default()
+        };
+        app.on_gateway(Event::VoiceStateUpdate {
+            state: in_voice(2),
+            left: false,
+        });
+        app.on_gateway(Event::VoiceStateUpdate {
+            state: in_voice(3),
+            left: false,
+        });
+        let screen = render(&mut app, 100, 30);
+        assert!(screen.contains("Lounge") && screen.contains("○ Alice"), "{screen}");
+        assert!(screen.contains("○ Bob muted"), "{screen}");
+
+        // Enter on the channel joins it (and opens its text chat).
+        app.activate(Entry::Channel(Snowflake(150)));
+        if !voice::SUPPORTED {
+            assert!(app.error.as_ref().is_some_and(|(e, _)| e.contains("no voice support")));
+            return;
+        }
+        assert_eq!(app.voice.call.as_ref().map(|c| c.status), Some(voice::Status::Joining));
+        assert!(render(&mut app, 100, 30).contains("joining"));
+
+        // Our session plus the server's address start the connection.
+        app.on_gateway(Event::VoiceStateUpdate {
+            state: in_voice(1),
+            left: false,
+        });
+        app.on_gateway(Event::VoiceServerUpdate {
+            guild_id: Some(Snowflake(10)),
+            channel_id: None,
+            endpoint: Some("ws://127.0.0.1:9".into()),
+            token: "t".into(),
+        });
+        assert_eq!(
+            app.voice.call.as_ref().map(|c| c.status),
+            Some(voice::Status::Connecting)
+        );
+
+        // Mute, deafen and leave from anywhere.
+        let alt = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT);
+        app.on_key(alt('m'));
+        assert!(app.voice.muted);
+        app.on_key(alt('d'));
+        assert!(app.voice.deafened && app.voice.muted);
+        assert!(render(&mut app, 100, 30).contains("[deafened]"));
+        app.on_key(alt('m'));
+        assert!(!app.voice.muted && !app.voice.deafened, "unmuting undeafens");
+        app.on_key(alt('l'));
+        assert!(app.voice.call.is_none());
+
+        // /call works in DMs, not in text channels.
+        app.open_channel(Snowflake(100));
+        app.input.set("/call".into());
+        app.submit();
+        assert!(app.voice.call.is_none());
+        assert!(
+            app.error
+                .as_ref()
+                .is_some_and(|(e, _)| e.contains("voice channels and DMs"))
+        );
+        app.open_channel(Snowflake(200));
+        app.input.set("/call".into());
+        app.submit();
+        assert_eq!(
+            app.voice.call.as_ref().map(|c| (c.channel_id, c.guild_id)),
+            Some((Snowflake(200), None))
+        );
     }
 
     #[tokio::test]

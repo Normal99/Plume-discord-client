@@ -8,6 +8,11 @@ description = "Plume's Feather-tier terminal client"
 name = "plume-tui"
 path = "src/main.rs"
 
+[features]
+default = ["voice"]
+# Voice calls (microphone, speakers, DAVE). Needs ALSA headers on Linux.
+voice = ["dep:plume-voice"]
+
 [dependencies]
 plume-auth.workspace = true
 plume-core.workspace = true
@@ -15,6 +20,7 @@ plume-gateway.workspace = true
 plume-markdown.workspace = true
 plume-notify.workspace = true
 plume-rest.workspace = true
+plume-voice = { workspace = true, features = ["audio"], optional = true }
 chrono.workspace = true
 crossterm.workspace = true
 futures-util.workspace = true
@@ -24,3 +30,6 @@ tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 unicode-width.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
