@@ -1,5 +1,7 @@
 //! Discord voice: the voice gateway, UDP transport, encryption and audio.
 
+#[cfg(feature = "audio")]
+pub mod audio;
 mod connection;
 pub mod crypto;
 pub mod dave;
