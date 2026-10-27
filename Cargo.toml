@@ -7,6 +7,7 @@ members = [
     "crates/plume-markdown",
     "crates/plume-auth",
     "crates/plume-notify",
+    "crates/plume-voice",
     "crates/plume-tui",
 ]
 
@@ -23,6 +24,7 @@ plume-auth = { path = "crates/plume-auth" }
 plume-rest = { path = "crates/plume-rest" }
 plume-markdown = { path = "crates/plume-markdown" }
 plume-notify = { path = "crates/plume-notify" }
+plume-voice = { path = "crates/plume-voice" }
 
 base64 = "0.23"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

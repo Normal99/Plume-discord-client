@@ -4,6 +4,7 @@
 pub const DISPATCH: u8 = 0;
 pub const HEARTBEAT: u8 = 1;
 pub const IDENTIFY: u8 = 2;
+pub const VOICE_STATE_UPDATE: u8 = 4;
 pub const RESUME: u8 = 6;
 pub const RECONNECT: u8 = 7;
 pub const INVALID_SESSION: u8 = 9;

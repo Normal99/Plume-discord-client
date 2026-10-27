@@ -27,9 +27,14 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # cpal (voice audio) needs the ALSA headers on Linux.
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo clippy -p plume-tui --no-default-features --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      # Some DAVE tests feed garbage to openmls, which only debug-asserts in debug builds.
+      - run: cargo test -p plume-voice --release --locked
 
   build:
     name: build (${{ matrix.name }})
@@ -38,11 +43,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Static (musl), so it runs on any Linux distribution.
+          # Static (musl), so it runs on any Linux distribution. No voice:
+          # audio needs the system's ALSA library.
           - name: linux-x86_64
             os: ubuntu-latest
             exe: plume-tui
             target: x86_64-unknown-linux-musl
+            flags: --no-default-features
+          # With voice. Built on an older Ubuntu so it runs on older glibc.
+          - name: linux-x86_64-voice
+            os: ubuntu-22.04
+            exe: plume-tui
+            target: x86_64-unknown-linux-gnu
           - name: windows-x86_64
             os: windows-latest
             exe: plume-tui.exe
@@ -62,7 +74,9 @@ jobs:
           key: release-${{ matrix.target }}
       - if: contains(matrix.target, 'musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - run: cargo build --release --locked -p plume-tui --target ${{ matrix.target }}
+      - if: contains(matrix.target, 'linux-gnu')
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - run: cargo build --release --locked -p plume-tui --target ${{ matrix.target }} ${{ matrix.flags }}
       - name: Package
         shell: bash
         run: |

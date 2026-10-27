@@ -32,6 +32,18 @@ const MAX_BACKOFF: Duration = Duration::from_secs(60);
 enum Command {
     /// Ask for typing indicators (and threads) in a server.
     SubscribeGuild(Snowflake),
+    /// Join, move between or leave voice channels.
+    Voice(VoiceRequest),
+}
+
+/// Where we want to be in voice. `channel_id: None` means "not in voice".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VoiceRequest {
+    /// `None` for DM and group calls.
+    pub guild_id: Option<Snowflake>,
+    pub channel_id: Option<Snowflake>,
+    pub self_mute: bool,
+    pub self_deaf: bool,
 }
 
 /// Sends requests to a running [`Gateway`]. Cheap to clone. If the gateway
@@ -46,6 +58,12 @@ impl GatewayHandle {
     /// servers the client says it's looking at. Repeats are free.
     pub fn subscribe_channel(&self, guild_id: Snowflake, _channel_id: Snowflake) {
         let _ = self.commands.send(Command::SubscribeGuild(guild_id));
+    }
+
+    /// Joins, moves or leaves voice, or changes mute/deafen. Discord answers
+    /// with `VoiceStateUpdate` and, when joining, `VoiceServerUpdate`.
+    pub fn update_voice(&self, request: VoiceRequest) {
+        let _ = self.commands.send(Command::Voice(request));
     }
 }
 
@@ -67,6 +85,8 @@ pub struct Gateway {
     subscribed: BTreeSet<Snowflake>,
     /// The logged-in user, from READY.
     me: Option<Snowflake>,
+    /// Where we are in voice; a new session starts outside it, so re-sent after READY.
+    voice: Option<VoiceRequest>,
 }
 
 /// How a connection ended.
@@ -109,6 +129,7 @@ impl Gateway {
             seq: None,
             subscribed: BTreeSet::new(),
             me: None,
+            voice: None,
         }
     }
 
@@ -268,6 +289,9 @@ impl Gateway {
                         // A new session forgets subscriptions, so ask again.
                         let guilds: Vec<Snowflake> = self.subscribed.iter().copied().collect();
                         self.send_subscriptions(&mut socket, &guilds).await?;
+                        if let Some(voice) = self.voice.filter(|v| v.channel_id.is_some()) {
+                            self.send_voice(&mut socket, voice).await?;
+                        }
                     }
                 }
                 opcodes::HEARTBEAT => {
@@ -331,7 +355,28 @@ impl Gateway {
                     self.send_subscriptions(socket, &[guild_id]).await?;
                 }
             }
+            Command::Voice(request) => {
+                self.voice = Some(request);
+                if ready {
+                    self.send_voice(socket, request).await?;
+                }
+            }
         }
+        Ok(())
+    }
+
+    async fn send_voice(&self, socket: &mut Socket, voice: VoiceRequest) -> Result<(), GatewayError> {
+        let payload = json!({
+            "op": opcodes::VOICE_STATE_UPDATE,
+            "d": {
+                "guild_id": voice.guild_id,
+                "channel_id": voice.channel_id,
+                "self_mute": voice.self_mute,
+                "self_deaf": voice.self_deaf,
+                "self_video": false,
+            },
+        });
+        socket.send(WsMessage::text(payload.to_string())).await?;
         Ok(())
     }
 

@@ -6,7 +6,7 @@ use std::time::Duration;
 use flate2::{Compress, Compression, FlushCompress};
 use futures_util::{SinkExt, StreamExt};
 use plume_core::{Event, Snowflake, Token};
-use plume_gateway::{Gateway, GatewayError};
+use plume_gateway::{Gateway, GatewayError, VoiceRequest};
 use serde_json::{Value, json};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
@@ -279,4 +279,65 @@ async fn dropped_connection_resumes_after_a_short_wait() {
     let mut client = Client::accept(&listener).await;
     client.hello(45_000).await;
     assert_eq!(client.recv(true).await["op"], 6);
+}
+
+#[tokio::test]
+async fn voice_requests_wait_for_ready_and_survive_a_new_session() {
+    let (listener, url) = setup().await;
+    let (events_tx, mut events) = mpsc::channel(16);
+    let gateway = Gateway::new(Token::new("t"), events_tx).with_url(&url);
+    let handle = gateway.handle();
+    let _task = tokio::spawn(gateway.run());
+    let join = VoiceRequest {
+        guild_id: Some(Snowflake(10)),
+        channel_id: Some(Snowflake(150)),
+        self_mute: false,
+        self_deaf: true,
+    };
+
+    // Asked before we're logged in: sent right after READY.
+    handle.update_voice(join);
+    let mut client = Client::accept(&listener).await;
+    client.hello(45_000).await;
+    assert_eq!(client.recv(true).await["op"], 2);
+    client.dispatch(1, "READY", ready(&url)).await;
+    next_event(&mut events).await;
+    let voice = client.recv(true).await;
+    assert_eq!(voice["op"], 4);
+    assert_eq!(voice["d"]["guild_id"], "10");
+    assert_eq!(voice["d"]["channel_id"], "150");
+    assert_eq!(voice["d"]["self_deaf"], true);
+
+    // Discord answers with where to connect.
+    client
+        .dispatch(
+            2,
+            "VOICE_SERVER_UPDATE",
+            json!({ "token": "vtok", "guild_id": "10", "endpoint": "c-ams1.discord.media:443" }),
+        )
+        .await;
+    assert!(matches!(
+        next_event(&mut events).await,
+        Event::VoiceServerUpdate { endpoint: Some(e), token, .. } if e == "c-ams1.discord.media:443" && token == "vtok"
+    ));
+
+    // A new session starts outside voice, so the client rejoins.
+    client.send(json!({ "op": 9, "d": false })).await;
+    let mut client = Client::accept(&listener).await;
+    client.hello(45_000).await;
+    assert_eq!(client.recv(true).await["op"], 2);
+    client.dispatch(1, "READY", ready(&url)).await;
+    let voice = client.recv(true).await;
+    assert_eq!(
+        (voice["op"].as_u64(), voice["d"]["channel_id"].as_str()),
+        (Some(4), Some("150"))
+    );
+
+    // Leaving sends a null channel.
+    handle.update_voice(VoiceRequest {
+        channel_id: None,
+        ..join
+    });
+    let leave = client.recv(true).await;
+    assert!(leave["d"]["channel_id"].is_null());
 }

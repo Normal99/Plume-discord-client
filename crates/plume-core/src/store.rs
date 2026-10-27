@@ -8,7 +8,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::models::{Channel, ChannelKind, Guild, GuildSettings, Message, Reaction, ReadState, User};
+use crate::models::{Channel, ChannelKind, Guild, GuildSettings, Message, Reaction, ReadState, User, VoiceState};
 use crate::{Event, Profile, Snowflake, permissions};
 
 /// Unread state for a channel (or, summed, for a whole server).
@@ -55,6 +55,8 @@ pub struct Store {
     /// Bumped on every change that could alter what's shown, so frontends
     /// can cache what they render.
     revision: u64,
+    /// Who's in voice, by user (one call at a time per user).
+    voice: HashMap<Snowflake, VoiceState>,
 }
 
 impl Store {
@@ -72,6 +74,7 @@ impl Store {
             last_read: HashMap::new(),
             muted: HashSet::new(),
             revision: 0,
+            voice: HashMap::new(),
         }
     }
 
@@ -133,6 +136,18 @@ impl Store {
     /// Whether the newest messages still need fetching for this channel.
     pub fn needs_history(&self, channel_id: Snowflake) -> bool {
         !self.histories.get(&channel_id).is_some_and(|h| h.loaded)
+    }
+
+    /// Who's in a voice channel or call, in a stable order.
+    pub fn voice_members(&self, channel_id: Snowflake) -> Vec<&VoiceState> {
+        let mut members: Vec<&VoiceState> = self.voice.values().filter(|v| v.channel_id == channel_id).collect();
+        members.sort_by_key(|v| v.user_id);
+        members
+    }
+
+    /// Your own voice state, if you're in a channel or call.
+    pub fn my_voice(&self) -> Option<&VoiceState> {
+        self.voice.get(&self.me.as_ref()?.id)
     }
 
     /// Whether you're allowed to see a channel. DMs, and channels in servers
@@ -338,8 +353,10 @@ impl Store {
                 users,
                 read_states,
                 settings,
+                voice_states,
             } => {
                 self.guilds = guilds.into_iter().map(|g| (g.id, g)).collect();
+                self.voice = voice_states.into_iter().map(|v| (v.user_id, v)).collect();
                 self.channels = channels.into_iter().map(|c| (c.id, c)).collect();
                 for user in users {
                     self.users.insert(user.id, user);
@@ -357,7 +374,13 @@ impl Store {
                 self.apply_read_states(read_states);
             }
             Event::Resumed | Event::Disconnected | Event::TypingStart { .. } | Event::Other(_) => {}
-            Event::GuildCreate { mut guild, channels } => {
+            Event::GuildCreate {
+                mut guild,
+                channels,
+                voice_states,
+            } => {
+                self.voice.retain(|_, v| v.guild_id != Some(guild.id));
+                self.voice.extend(voice_states.into_iter().map(|v| (v.user_id, v)));
                 if let Some(old) = self.guilds.remove(&guild.id) {
                     for id in old.channels {
                         self.channels.remove(&id);
@@ -425,6 +448,15 @@ impl Store {
                 }
             }
             Event::GuildSettingsUpdate(settings) => self.apply_settings(settings),
+            Event::VoiceStateUpdate { state, left } => {
+                if left {
+                    self.voice.remove(&state.user_id);
+                } else {
+                    self.voice.insert(state.user_id, state);
+                }
+            }
+            // Only the voice connection cares about these.
+            Event::VoiceServerUpdate { .. } => {}
             Event::ThreadsSync { guild_id, threads } => {
                 for mut thread in threads {
                     thread.guild_id = Some(guild_id);
@@ -487,6 +519,7 @@ impl Store {
             Event::GuildDelete { id, unavailable } => {
                 // During an outage the server is still there; keep showing it.
                 if !unavailable && let Some(guild) = self.guilds.remove(&id) {
+                    self.voice.retain(|_, v| v.guild_id != Some(id));
                     for channel_id in guild.channels {
                         self.forget_channel(channel_id);
                     }
@@ -764,6 +797,7 @@ mod tests {
             users: vec![user(2)],
             read_states: Vec::new(),
             settings: Vec::new(),
+            voice_states: Vec::new(),
         });
         store
     }
@@ -957,6 +991,7 @@ mod tests {
             users: Vec::new(),
             read_states: Vec::new(),
             settings: Vec::new(),
+            voice_states: Vec::new(),
         });
         assert!(store.needs_history(Snowflake(100)));
         assert_eq!(ids(&store, 100), [1], "old messages stay visible until the refetch");
@@ -989,6 +1024,7 @@ mod tests {
                 muted: false,
                 muted_channels: vec![Snowflake(102)],
             }],
+            voice_states: Vec::new(),
         });
         assert_eq!(store.unread(Snowflake(100)), Unread::default(), "read up to the newest");
         assert_eq!(
@@ -1238,5 +1274,53 @@ mod tests {
         store.open_channel(Snowflake(101));
         assert_eq!(store.messages(Snowflake(100)).len(), 50);
         assert_eq!(ids(&store, 100).last(), Some(&201));
+    }
+
+    #[test]
+    fn voice_states() {
+        use crate::models::VoiceState;
+        let mut store = ready_store(Profile::FEATHER);
+        let state = |user: u64, channel: u64| VoiceState {
+            guild_id: Some(Snowflake(10)),
+            channel_id: Snowflake(channel),
+            user_id: Snowflake(user),
+            ..VoiceState::default()
+        };
+        store.apply(Event::VoiceStateUpdate {
+            state: state(2, 150),
+            left: false,
+        });
+        store.apply(Event::VoiceStateUpdate {
+            state: state(1, 150),
+            left: false,
+        });
+        let ids = |store: &Store| -> Vec<u64> {
+            store
+                .voice_members(Snowflake(150))
+                .iter()
+                .map(|v| v.user_id.0)
+                .collect()
+        };
+        assert_eq!(ids(&store), [1, 2]);
+        assert_eq!(store.my_voice().map(|v| v.channel_id), Some(Snowflake(150)));
+
+        // Moving channels replaces the old state; leaving removes it.
+        store.apply(Event::VoiceStateUpdate {
+            state: state(2, 151),
+            left: false,
+        });
+        assert_eq!(ids(&store), [1]);
+        store.apply(Event::VoiceStateUpdate {
+            state: state(1, 0),
+            left: true,
+        });
+        assert!(store.my_voice().is_none());
+
+        // A server going away takes its voice states with it.
+        store.apply(Event::GuildDelete {
+            id: Snowflake(10),
+            unavailable: false,
+        });
+        assert!(store.voice_members(Snowflake(151)).is_empty());
     }
 }

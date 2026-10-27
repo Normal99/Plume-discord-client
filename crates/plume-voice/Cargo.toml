@@ -1,0 +1,27 @@
+[package]
+name = "plume-voice"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+plume-core.workspace = true
+aes-gcm = "0.10"
+chacha20poly1305 = "0.10"
+davey = "0.1.5"
+cpal = { version = "0.18", optional = true }
+opus = { version = "0.4", optional = true }
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
+tokio-tungstenite.workspace = true
+tracing.workspace = true
+
+[features]
+# Microphone, speakers and Opus. Off for headless use and tests on
+# machines without audio libraries.
+audio = ["dep:cpal", "dep:opus"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }

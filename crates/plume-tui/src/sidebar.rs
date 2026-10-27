@@ -12,6 +12,8 @@ pub enum Entry {
     Guild(Snowflake),
     Category(Snowflake),
     Channel(Snowflake),
+    /// Someone in a voice channel, listed under it: (channel, user).
+    VoiceMember(Snowflake, Snowflake),
 }
 
 /// The tree of DMs, servers and channels, flattened into rows.
@@ -144,8 +146,16 @@ impl Sidebar {
         self.entries.clear();
         self.entries.push(Entry::DmHeader);
         if !self.dms_collapsed {
-            self.entries
-                .extend(sorted_dms(store).into_iter().take(MAX_DMS).map(Entry::Dm));
+            for id in sorted_dms(store).into_iter().take(MAX_DMS) {
+                self.entries.push(Entry::Dm(id));
+                // People in a call with you show under the DM.
+                self.entries.extend(
+                    store
+                        .voice_members(id)
+                        .iter()
+                        .map(|v| Entry::VoiceMember(id, v.user_id)),
+                );
+            }
         }
         self.entries.push(Entry::ServerHeader);
         for guild in sorted_guilds(store) {
@@ -181,7 +191,8 @@ pub fn sorted_guilds(store: &Store) -> Vec<&Guild> {
 
 /// A server's text channels in Discord's order: uncategorised ones first,
 /// then each category followed by its channels, each channel followed by
-/// its active threads (busiest first). Empty categories are skipped.
+/// its active threads (busiest first) or, for voice channels, who's in
+/// them. Empty categories are skipped.
 /// Channels we can't read are left out unless `show_locked` is set.
 pub fn guild_channels(store: &Store, guild: &Guild, show_locked: bool) -> Vec<Entry> {
     let channels: Vec<&Channel> = guild
@@ -192,7 +203,10 @@ pub fn guild_channels(store: &Store, guild: &Guild, show_locked: bool) -> Vec<En
         .collect();
     let order = |c: &&Channel| (c.position, c.id);
     // Forums hold their posts as threads, so they're listed like channels.
-    let listed = |c: &Channel| (c.kind.is_text() || c.kind == ChannelKind::Forum) && c.kind != ChannelKind::Thread;
+    let listed = |c: &Channel| {
+        (c.kind.is_text() || matches!(c.kind, ChannelKind::Forum | ChannelKind::Voice | ChannelKind::Stage))
+            && c.kind != ChannelKind::Thread
+    };
     let threads_of = |parent: Snowflake| {
         let mut threads: Vec<&Channel> = channels
             .iter()
@@ -206,6 +220,12 @@ pub fn guild_channels(store: &Store, guild: &Guild, show_locked: bool) -> Vec<En
         for channel in list {
             entries.push(Entry::Channel(channel.id));
             entries.extend(threads_of(channel.id));
+            entries.extend(
+                store
+                    .voice_members(channel.id)
+                    .iter()
+                    .map(|v| Entry::VoiceMember(channel.id, v.user_id)),
+            );
         }
     };
 

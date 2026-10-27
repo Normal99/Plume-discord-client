@@ -1,5 +1,5 @@
 use crate::Snowflake;
-use crate::models::{Channel, Embed, Emoji, Guild, GuildSettings, Message, ReadState, Role, User};
+use crate::models::{Channel, Embed, Emoji, Guild, GuildSettings, Message, ReadState, Role, User, VoiceState};
 
 /// Something that happened on Discord, already decoded into models.
 /// The gateway produces these; [`crate::Store::apply`] consumes them.
@@ -14,6 +14,8 @@ pub enum Event {
         users: Vec<User>,
         read_states: Vec<ReadState>,
         settings: Vec<GuildSettings>,
+        /// Everyone in a voice channel in your servers.
+        voice_states: Vec<VoiceState>,
     },
     /// A dropped connection was picked up again without losing events.
     Resumed,
@@ -22,6 +24,7 @@ pub enum Event {
     GuildCreate {
         guild: Guild,
         channels: Vec<Channel>,
+        voice_states: Vec<VoiceState>,
     },
     /// The server's name, owner or roles changed. `None` means unchanged.
     GuildUpdate {
@@ -95,6 +98,19 @@ pub enum Event {
     },
     /// Your mute settings for a server changed.
     GuildSettingsUpdate(GuildSettings),
+    /// Someone joined, moved or left voice (`left`), or (un)muted.
+    VoiceStateUpdate {
+        state: VoiceState,
+        left: bool,
+    },
+    /// Where to connect for the voice channel you asked to join.
+    VoiceServerUpdate {
+        guild_id: Option<Snowflake>,
+        channel_id: Option<Snowflake>,
+        /// `None` while Discord finds a new server; wait for another update.
+        endpoint: Option<String>,
+        token: String,
+    },
     /// The active threads in (part of) a server, after you gain access.
     ThreadsSync {
         guild_id: Snowflake,

@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use plume_core::models::User;
 use plume_core::wire::{
     WireChannel, WireEmbed, WireEmoji, WireGuild, WireGuildProperties, WireGuildSettings, WireList, WireMember,
-    WireMessage, WireReadState, WireRole, WireUser,
+    WireMessage, WireReadState, WireRole, WireUser, WireVoiceState,
 };
 use plume_core::{Event, Snowflake};
 use serde::Deserialize;
@@ -39,9 +39,14 @@ pub fn decode(name: &str, data: &RawValue, me: Option<Snowflake>) -> Result<Deco
         }
         "RESUMED" => Event::Resumed,
         "GUILD_CREATE" => {
-            let guild: WireGuild = serde_json::from_str(json)?;
+            let mut guild: WireGuild = serde_json::from_str(json)?;
+            let voice_states = guild.take_voice_states();
             let (guild, channels) = guild.into_models(me);
-            Event::GuildCreate { guild, channels }
+            Event::GuildCreate {
+                guild,
+                channels,
+                voice_states,
+            }
         }
         "GUILD_UPDATE" => {
             let update: WireGuildUpdate = serde_json::from_str(json)?;
@@ -158,6 +163,22 @@ pub fn decode(name: &str, data: &RawValue, me: Option<Snowflake>) -> Result<Deco
                     .collect(),
             }
         }
+        "VOICE_STATE_UPDATE" => {
+            let state: WireVoiceState = serde_json::from_str(json)?;
+            match state.into_model(None) {
+                Ok(state) => Event::VoiceStateUpdate { state, left: false },
+                Err(state) => Event::VoiceStateUpdate { state, left: true },
+            }
+        }
+        "VOICE_SERVER_UPDATE" => {
+            let server: WireVoiceServer = serde_json::from_str(json)?;
+            Event::VoiceServerUpdate {
+                guild_id: server.guild_id,
+                channel_id: server.channel_id,
+                endpoint: server.endpoint.filter(|e| !e.is_empty()),
+                token: server.token,
+            }
+        }
         "CHANNEL_DELETE" => {
             let channel: WireId = serde_json::from_str(json)?;
             Event::ChannelDelete { id: channel.id }
@@ -225,13 +246,15 @@ impl WireReady {
         let mut channels = Vec::new();
         let mut users: Vec<User> = self.users.into_iter().map(WireUser::into_model).collect();
 
+        let mut voice_states = Vec::new();
         let mut merged_members = self.merged_members.into_iter();
-        for guild in self.guilds {
+        for mut guild in self.guilds {
             // Keep the two lists in step, even for guilds we skip.
             let members = merged_members.next().unwrap_or_default();
             if guild.unavailable {
                 continue;
             }
+            voice_states.extend(guild.take_voice_states());
             let (mut guild, guild_channels) = guild.into_models(Some(me));
             if guild.my_roles.is_none() {
                 guild.my_roles = members.into_iter().find(|m| m.user_id() == Some(me)).map(|m| m.roles);
@@ -263,6 +286,7 @@ impl WireReady {
                     .into_iter()
                     .map(|s| s.into_model(now_unix()))
                     .collect(),
+                voice_states,
             },
             session: Some(ResumeState {
                 session_id: self.session_id,
@@ -345,6 +369,18 @@ struct WireId {
 }
 
 #[derive(Deserialize)]
+struct WireVoiceServer {
+    token: String,
+    #[serde(default)]
+    guild_id: Option<Snowflake>,
+    /// Set instead of `guild_id` for DM calls.
+    #[serde(default)]
+    channel_id: Option<Snowflake>,
+    #[serde(default)]
+    endpoint: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct WireThreadListSync {
     guild_id: Snowflake,
     #[serde(default)]
@@ -381,6 +417,44 @@ mod tests {
     fn decode_str(name: &str, json: &str) -> Decoded {
         let raw = RawValue::from_string(json.to_owned()).unwrap();
         decode(name, &raw, Some(Snowflake(1))).unwrap()
+    }
+
+    #[test]
+    fn decodes_voice_events() {
+        let joined = decode_str(
+            "VOICE_STATE_UPDATE",
+            r#"{"guild_id": "10", "channel_id": "150", "user_id": "2", "session_id": "s",
+                "self_mute": true, "self_deaf": false, "mute": false, "deaf": false, "member": {"roles": []}}"#,
+        );
+        let Event::VoiceStateUpdate { state, left: false } = joined.event else {
+            panic!("wrong event");
+        };
+        assert_eq!(
+            (state.channel_id, state.user_id, state.self_mute),
+            (Snowflake(150), Snowflake(2), true)
+        );
+        assert!(state.is_muted() && !state.is_deafened());
+
+        let left = decode_str(
+            "VOICE_STATE_UPDATE",
+            r#"{"guild_id": "10", "channel_id": null, "user_id": "2", "session_id": "s"}"#,
+        );
+        assert!(matches!(left.event, Event::VoiceStateUpdate { left: true, state } if state.user_id == Snowflake(2)));
+
+        // DM calls name the channel instead of a server; a null endpoint means "wait".
+        let server = decode_str(
+            "VOICE_SERVER_UPDATE",
+            r#"{"token": "t", "channel_id": "200", "endpoint": null}"#,
+        );
+        assert_eq!(
+            server.event,
+            Event::VoiceServerUpdate {
+                guild_id: None,
+                channel_id: Some(Snowflake(200)),
+                endpoint: None,
+                token: "t".into()
+            }
+        );
     }
 
     #[test]
